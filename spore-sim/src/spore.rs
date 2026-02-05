@@ -239,6 +239,20 @@ impl Spore {
         }
     }
 
+    /// Convert output activations to a byte.
+    ///
+    /// Each output neuron corresponds to one bit of the output byte.
+    /// output[0] = bit 0 (LSB), output[7] = bit 7 (MSB)
+    pub fn output_as_byte(&self) -> u8 {
+        let mut byte = 0u8;
+        for (i, &bit) in self.output.iter().enumerate() {
+            if bit {
+                byte |= 1 << i;
+            }
+        }
+        byte
+    }
+
     /// Advance the pipeline and decay traces.
     ///
     /// This must be called after propagate() each tick:

@@ -226,3 +226,33 @@ fn test_tick_end_multiple_decays() {
     let expected = 0.9_f32.powi(10);
     assert!((spore.traces_ih[0][0] - expected).abs() < 0.001);
 }
+
+#[test]
+fn test_output_as_byte_all_zeros() {
+    let mut spore = Spore::new();
+    spore.output = [false; OUTPUT_SIZE];
+    assert_eq!(spore.output_as_byte(), 0x00);
+}
+
+#[test]
+fn test_output_as_byte_all_ones() {
+    let mut spore = Spore::new();
+    spore.output = [true; OUTPUT_SIZE];
+    assert_eq!(spore.output_as_byte(), 0xFF);
+}
+
+#[test]
+fn test_output_as_byte_specific_pattern() {
+    let mut spore = Spore::new();
+    // Set bits 0, 2, 4, 6 (0b01010101 = 0x55)
+    spore.output = [true, false, true, false, true, false, true, false];
+    assert_eq!(spore.output_as_byte(), 0x55);
+}
+
+#[test]
+fn test_output_as_byte_another_pattern() {
+    let mut spore = Spore::new();
+    // Set bits 1, 3, 5, 7 (0b10101010 = 0xAA)
+    spore.output = [false, true, false, true, false, true, false, true];
+    assert_eq!(spore.output_as_byte(), 0xAA);
+}
