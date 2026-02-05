@@ -74,6 +74,83 @@ impl Environment {
     pub fn input_history_len(&self) -> usize {
         self.input_history.len()
     }
+
+    /// Process one simulation tick.
+    ///
+    /// # Arguments
+    /// * `tick` - Current simulation tick
+    /// * `spore_output` - The Spore's output byte
+    ///
+    /// # Returns
+    /// * `Some(correct_bits)` - If a reward is being delivered this tick
+    /// * `None` - If no reward is due
+    ///
+    /// # Pipeline-Aware Judging
+    /// The Spore's output at tick T reflects the input from tick T-PIPELINE_LATENCY.
+    /// We judge against `input_history[0]` (oldest entry).
+    pub fn tick(&mut self, tick: u64, spore_output: u8) -> Option<u8> {
+        let mut rng = rand::thread_rng();
+
+        // ====================================================================
+        // JUDGE OUTPUT (against pipeline-delayed input)
+        // ====================================================================
+        let judge_input = self.input_history[0];  // Oldest entry
+        let error_bits = (spore_output ^ judge_input).count_ones() as u8;
+        let correct_bits = 8 - error_bits;
+
+        // ====================================================================
+        // SCHEDULE REWARD
+        // ====================================================================
+        let deliver_at = tick + self.reward_latency;
+        self.pending_rewards.push_back((deliver_at, correct_bits));
+
+        // ====================================================================
+        // DELIVER PENDING REWARDS
+        // ====================================================================
+        let mut reward = None;
+        while let Some(&(t, bits)) = self.pending_rewards.front() {
+            if t <= tick {
+                self.pending_rewards.pop_front();
+                reward = Some(bits);  // Take most recent if multiple
+            } else {
+                break;
+            }
+        }
+
+        // ====================================================================
+        // UPDATE INPUT HISTORY (sliding window)
+        // ====================================================================
+        self.input_history.pop_front();
+        self.input_history.push_back(self.current_input);
+
+        // ====================================================================
+        // ADVANCE INPUT PATTERN
+        // ====================================================================
+        self.ticks_on_current += 1;
+        if self.ticks_on_current >= self.input_hold_ticks {
+            self.ticks_on_current = 0;
+            self.current_input = rng.gen::<u8>();
+        }
+
+        reward
+    }
+
+    // ========================================================================
+    // TEST HELPERS
+    // ========================================================================
+
+    /// Set input history for testing (front = oldest, back = newest).
+    pub fn set_input_history_for_test(&mut self, history: &[u8]) {
+        self.input_history.clear();
+        for &h in history {
+            self.input_history.push_back(h);
+        }
+    }
+
+    /// Get ticks on current input for testing.
+    pub fn ticks_on_current_for_test(&self) -> u64 {
+        self.ticks_on_current
+    }
 }
 
 impl Default for Environment {
