@@ -256,3 +256,63 @@ fn test_output_as_byte_another_pattern() {
     spore.output = [false, true, false, true, false, true, false, true];
     assert_eq!(spore.output_as_byte(), 0xAA);
 }
+
+#[test]
+fn test_receive_reward_perfect_accuracy() {
+    let mut spore = Spore::new();
+    spore.receive_reward(8);  // 8/8 correct
+
+    // dopamine = (8/8)² - (0.5)² = 1.0 - 0.25 = 0.75
+    assert!((spore.dopamine - 0.75).abs() < 0.001);
+}
+
+#[test]
+fn test_receive_reward_zero_accuracy() {
+    let mut spore = Spore::new();
+    spore.receive_reward(0);  // 0/8 correct
+
+    // dopamine = (0/8)² - (0.5)² = 0 - 0.25 = -0.25
+    assert!((spore.dopamine - (-0.25)).abs() < 0.001);
+}
+
+#[test]
+fn test_receive_reward_baseline_accuracy() {
+    let mut spore = Spore::new();
+    spore.receive_reward(4);  // 4/8 = 50% = baseline
+
+    // dopamine = (4/8)² - (0.5)² = 0.25 - 0.25 = 0
+    assert!(spore.dopamine.abs() < 0.001);
+}
+
+#[test]
+fn test_receive_reward_frustration_spikes_on_low_accuracy() {
+    let mut spore = Spore::new();
+    spore.frustration = 0.5;  // Start at some value
+
+    spore.receive_reward(3);  // 3/8 = 37.5% < 50%
+
+    // Fix 2: Frustration should spike to 1.0 immediately
+    assert_eq!(spore.frustration, 1.0);
+}
+
+#[test]
+fn test_receive_reward_frustration_decays_on_high_accuracy() {
+    let mut spore = Spore::new();
+    spore.frustration = 1.0;
+
+    spore.receive_reward(8);  // 100% accuracy
+
+    // frustration = 0.8 * 1.0 + 0.2 * (1.0 - 1.0) = 0.8
+    assert!((spore.frustration - 0.8).abs() < 0.001);
+}
+
+#[test]
+fn test_receive_reward_frustration_ema_on_medium_accuracy() {
+    let mut spore = Spore::new();
+    spore.frustration = 0.5;
+
+    spore.receive_reward(6);  // 6/8 = 75% > 50%
+
+    // frustration = 0.8 * 0.5 + 0.2 * (1.0 - 0.75) = 0.4 + 0.05 = 0.45
+    assert!((spore.frustration - 0.45).abs() < 0.001);
+}

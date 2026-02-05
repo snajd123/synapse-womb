@@ -253,6 +253,37 @@ impl Spore {
         byte
     }
 
+    /// Receive reward signal and update dopamine/frustration.
+    ///
+    /// # Arguments
+    /// * `correct_bits` - Number of output bits that matched expected (0-8)
+    ///
+    /// # Dopamine Calculation (Fix 3: Anti-Hebbian)
+    /// - dopamine = (accuracy²) - (BASELINE_ACCURACY²)
+    /// - At 100% accuracy: 1.0 - 0.25 = +0.75 (strong reward)
+    /// - At 50% accuracy: 0.25 - 0.25 = 0 (neutral)
+    /// - At 0% accuracy: 0 - 0.25 = -0.25 (punishment)
+    ///
+    /// # Frustration Update (Fix 2: Fast Response)
+    /// - If accuracy < 50%: spike to 1.0 immediately
+    /// - Otherwise: EMA with α=0.2
+    pub fn receive_reward(&mut self, correct_bits: u8) {
+        let accuracy = correct_bits as f32 / 8.0;
+
+        // Fix 3: Signed dopamine - below baseline = punishment
+        let reward = accuracy * accuracy;
+        let baseline_reward = BASELINE_ACCURACY as f32 * BASELINE_ACCURACY as f32;
+        self.dopamine = reward - baseline_reward;
+
+        // Fix 2: Fast frustration response
+        if accuracy < 0.5 {
+            self.frustration = 1.0;  // Instant spike
+        } else {
+            // EMA with faster alpha (0.2 instead of 0.1)
+            self.frustration = 0.8 * self.frustration + 0.2 * (1.0 - accuracy);
+        }
+    }
+
     /// Advance the pipeline and decay traces.
     ///
     /// This must be called after propagate() each tick:
