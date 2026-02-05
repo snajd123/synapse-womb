@@ -341,6 +341,83 @@ impl Spore {
         self.dopamine = 0.0;
     }
 
+    /// Apply homeostasis: weight decay, weight normalization, threshold drift.
+    ///
+    /// # Weight Decay (every WEIGHT_DECAY_INTERVAL ticks)
+    /// Each weight loses ~1.5% of its value: w -= w >> 6
+    ///
+    /// # Weight Normalization (Fix 1: every tick)
+    /// If sum of absolute weights for a neuron exceeds MAX_WEIGHT_SUM,
+    /// all weights for that neuron are scaled down proportionally.
+    ///
+    /// # Threshold Drift (every tick)
+    /// Thresholds drift toward DEFAULT_THRESHOLD by ±1.
+    ///
+    /// # Arguments
+    /// * `tick` - Current simulation tick
+    pub fn maintain(&mut self, tick: u64) {
+        // ====================================================================
+        // WEIGHT DECAY (every WEIGHT_DECAY_INTERVAL ticks)
+        // ====================================================================
+        if tick % (WEIGHT_DECAY_INTERVAL as u64) == 0 && tick > 0 {
+            for row in &mut self.weights_ih {
+                for w in row {
+                    *w -= *w >> 6;  // ~1.5% decay
+                }
+            }
+            for row in &mut self.weights_ho {
+                for w in row {
+                    *w -= *w >> 6;
+                }
+            }
+        }
+
+        // ====================================================================
+        // WEIGHT NORMALIZATION (Fix 1: per-neuron budget)
+        // ====================================================================
+
+        // Input → Hidden weights
+        for h in 0..HIDDEN_SIZE {
+            let sum: i32 = self.weights_ih[h].iter().map(|&w| w.abs() as i32).sum();
+            if sum > MAX_WEIGHT_SUM {
+                let scale = MAX_WEIGHT_SUM as f32 / sum as f32;
+                for w in &mut self.weights_ih[h] {
+                    *w = (*w as f32 * scale) as i16;
+                }
+            }
+        }
+
+        // Hidden → Output weights
+        for o in 0..OUTPUT_SIZE {
+            let sum: i32 = self.weights_ho[o].iter().map(|&w| w.abs() as i32).sum();
+            if sum > MAX_WEIGHT_SUM {
+                let scale = MAX_WEIGHT_SUM as f32 / sum as f32;
+                for w in &mut self.weights_ho[o] {
+                    *w = (*w as f32 * scale) as i16;
+                }
+            }
+        }
+
+        // ====================================================================
+        // THRESHOLD DRIFT (every tick)
+        // ====================================================================
+        let default_t = DEFAULT_THRESHOLD as i16;
+        for t in &mut self.thresholds_h {
+            if *t < default_t {
+                *t += 1;
+            } else if *t > default_t {
+                *t -= 1;
+            }
+        }
+        for t in &mut self.thresholds_o {
+            if *t < default_t {
+                *t += 1;
+            } else if *t > default_t {
+                *t -= 1;
+            }
+        }
+    }
+
     /// Advance the pipeline and decay traces.
     ///
     /// This must be called after propagate() each tick:

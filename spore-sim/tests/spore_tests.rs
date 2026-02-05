@@ -434,3 +434,98 @@ fn test_learn_threshold_increases_on_negative_dopamine() {
     assert!(spore.thresholds_h[0] > 0,
         "Threshold should increase with negative dopamine");
 }
+
+// =============================================================================
+// maintain() (Homeostasis) Tests
+// =============================================================================
+
+#[test]
+fn test_maintain_weight_decay() {
+    let mut spore = Spore::new();
+    spore.weights_ih[0][0] = 64;  // Decays by w >> 6 = 1
+
+    // Decay happens every WEIGHT_DECAY_INTERVAL ticks
+    spore.maintain(WEIGHT_DECAY_INTERVAL as u64);
+
+    // 64 - (64 >> 6) = 64 - 1 = 63
+    assert_eq!(spore.weights_ih[0][0], 63);
+}
+
+#[test]
+fn test_maintain_weight_decay_not_every_tick() {
+    let mut spore = Spore::new();
+    spore.weights_ih[0][0] = 64;
+
+    // At tick 50 (not a multiple of 100), no decay
+    spore.maintain(50);
+
+    assert_eq!(spore.weights_ih[0][0], 64);
+}
+
+#[test]
+fn test_maintain_weight_normalization_over_budget() {
+    let mut spore = Spore::new();
+    // Set all weights to 100, sum = 800 > MAX_WEIGHT_SUM (400)
+    spore.weights_ih[0] = [100; INPUT_SIZE];
+
+    spore.maintain(0);
+
+    // Sum should now be <= MAX_WEIGHT_SUM
+    let sum: i32 = spore.weights_ih[0].iter().map(|&w| w.abs() as i32).sum();
+    assert!(sum <= MAX_WEIGHT_SUM, "Sum {} should be <= {}", sum, MAX_WEIGHT_SUM);
+}
+
+#[test]
+fn test_maintain_weight_normalization_under_budget() {
+    let mut spore = Spore::new();
+    // Set weights to low values, sum = 80 < MAX_WEIGHT_SUM
+    spore.weights_ih[0] = [10; INPUT_SIZE];
+    let original: [i16; INPUT_SIZE] = spore.weights_ih[0];
+
+    spore.maintain(0);
+
+    // Should be unchanged (no normalization needed)
+    assert_eq!(spore.weights_ih[0], original);
+}
+
+#[test]
+fn test_maintain_threshold_drift_up() {
+    let mut spore = Spore::new();
+    spore.thresholds_h[0] = 0;  // Below default
+
+    spore.maintain(0);
+
+    assert_eq!(spore.thresholds_h[0], 1);  // Drifted up by 1
+}
+
+#[test]
+fn test_maintain_threshold_drift_down() {
+    let mut spore = Spore::new();
+    spore.thresholds_h[0] = 100;  // Above default
+
+    spore.maintain(0);
+
+    assert_eq!(spore.thresholds_h[0], 99);  // Drifted down by 1
+}
+
+#[test]
+fn test_maintain_threshold_at_default_no_change() {
+    let mut spore = Spore::new();
+    spore.thresholds_h[0] = DEFAULT_THRESHOLD as i16;
+
+    spore.maintain(0);
+
+    assert_eq!(spore.thresholds_h[0], DEFAULT_THRESHOLD as i16);
+}
+
+#[test]
+fn test_maintain_output_weights_normalized() {
+    let mut spore = Spore::new();
+    // Set all output weights high
+    spore.weights_ho[0] = [50; HIDDEN_SIZE];  // sum = 1600 > MAX_WEIGHT_SUM
+
+    spore.maintain(0);
+
+    let sum: i32 = spore.weights_ho[0].iter().map(|&w| w.abs() as i32).sum();
+    assert!(sum <= MAX_WEIGHT_SUM, "Sum {} should be <= {}", sum, MAX_WEIGHT_SUM);
+}
