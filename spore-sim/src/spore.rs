@@ -238,6 +238,35 @@ impl Spore {
             }
         }
     }
+
+    /// Advance the pipeline and decay traces.
+    ///
+    /// This must be called after propagate() each tick:
+    /// 1. Copies hidden_next → hidden, output_next → output
+    /// 2. Decays all eligibility traces by trace_decay
+    pub fn tick_end(&mut self) {
+        // Advance the pipeline
+        self.hidden = self.hidden_next;
+        self.output = self.output_next;
+
+        // Decay all traces
+        for row in &mut self.traces_ih {
+            for t in row {
+                *t *= self.trace_decay;
+            }
+        }
+        for row in &mut self.traces_ho {
+            for t in row {
+                *t *= self.trace_decay;
+            }
+        }
+        for t in &mut self.traces_th {
+            *t *= self.trace_decay;
+        }
+        for t in &mut self.traces_to {
+            *t *= self.trace_decay;
+        }
+    }
 }
 
 impl Default for Spore {

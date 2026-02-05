@@ -170,3 +170,59 @@ fn test_propagate_does_not_set_trace_for_zero_input() {
         assert_eq!(spore.traces_ih[h][1], 0.0, "Trace should be 0 for non-firing input");
     }
 }
+
+#[test]
+fn test_tick_end_advances_pipeline() {
+    let mut spore = Spore::new();
+
+    // Set some values in hidden_next and output_next
+    spore.hidden_next[0] = true;
+    spore.hidden_next[5] = true;
+    spore.output_next[3] = true;
+
+    spore.tick_end();
+
+    // After tick_end, hidden should equal what hidden_next was
+    assert!(spore.hidden[0]);
+    assert!(spore.hidden[5]);
+    assert!(!spore.hidden[1]);  // Was false
+
+    // Same for output
+    assert!(spore.output[3]);
+    assert!(!spore.output[0]);  // Was false
+}
+
+#[test]
+fn test_tick_end_decays_traces() {
+    let mut spore = Spore::new();
+    spore.trace_decay = 0.9;
+
+    // Set some traces
+    spore.traces_ih[0][0] = 1.0;
+    spore.traces_ho[0][0] = 0.5;
+    spore.traces_th[0] = 1.0;
+    spore.traces_to[0] = 0.8;
+
+    spore.tick_end();
+
+    // Traces should decay by trace_decay
+    assert!((spore.traces_ih[0][0] - 0.9).abs() < 0.001);
+    assert!((spore.traces_ho[0][0] - 0.45).abs() < 0.001);
+    assert!((spore.traces_th[0] - 0.9).abs() < 0.001);
+    assert!((spore.traces_to[0] - 0.72).abs() < 0.001);
+}
+
+#[test]
+fn test_tick_end_multiple_decays() {
+    let mut spore = Spore::new();
+    spore.trace_decay = 0.9;
+    spore.traces_ih[0][0] = 1.0;
+
+    // After 10 ticks, trace should be 0.9^10 ≈ 0.349
+    for _ in 0..10 {
+        spore.tick_end();
+    }
+
+    let expected = 0.9_f32.powi(10);
+    assert!((spore.traces_ih[0][0] - expected).abs() < 0.001);
+}
