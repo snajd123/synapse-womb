@@ -284,6 +284,63 @@ impl Spore {
         }
     }
 
+    /// Apply Hebbian learning based on current dopamine and traces.
+    ///
+    /// For each synapse: weight += lr_scaled * dopamine * trace
+    /// For each threshold: threshold -= lr_scaled * dopamine * trace
+    ///
+    /// Dopamine can be negative (Fix 3: Anti-Hebbian), causing weights to
+    /// decrease and thresholds to increase.
+    ///
+    /// Uses stochastic rounding to handle small updates that would otherwise
+    /// truncate to zero in integer math.
+    ///
+    /// Consumes dopamine after learning (atomic update).
+    pub fn learn(&mut self) {
+        use crate::utils::stochastic_round;
+
+        // Skip if no dopamine signal
+        if self.dopamine.abs() < 0.001 {
+            return;
+        }
+
+        let lr_scaled = self.learning_rate * 100.0;
+        let d = self.dopamine;
+
+        // Update Input → Hidden weights
+        for h in 0..HIDDEN_SIZE {
+            for i in 0..INPUT_SIZE {
+                let change = lr_scaled * d * self.traces_ih[h][i];
+                let delta = stochastic_round(change);
+                self.weights_ih[h][i] = self.weights_ih[h][i].saturating_add(delta);
+            }
+
+            // Update hidden threshold
+            let t_change = lr_scaled * d * self.traces_th[h];
+            let t_delta = stochastic_round(t_change);
+            // Positive dopamine → decrease threshold (more eager)
+            // Negative dopamine → increase threshold (more stubborn)
+            self.thresholds_h[h] = self.thresholds_h[h].saturating_sub(t_delta);
+        }
+
+        // Update Hidden → Output weights
+        for o in 0..OUTPUT_SIZE {
+            for h in 0..HIDDEN_SIZE {
+                let change = lr_scaled * d * self.traces_ho[o][h];
+                let delta = stochastic_round(change);
+                self.weights_ho[o][h] = self.weights_ho[o][h].saturating_add(delta);
+            }
+
+            // Update output threshold
+            let t_change = lr_scaled * d * self.traces_to[o];
+            let t_delta = stochastic_round(t_change);
+            self.thresholds_o[o] = self.thresholds_o[o].saturating_sub(t_delta);
+        }
+
+        // Consume dopamine (atomic update)
+        self.dopamine = 0.0;
+    }
+
     /// Advance the pipeline and decay traces.
     ///
     /// This must be called after propagate() each tick:

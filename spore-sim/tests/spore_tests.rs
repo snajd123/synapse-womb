@@ -316,3 +316,121 @@ fn test_receive_reward_frustration_ema_on_medium_accuracy() {
     // frustration = 0.8 * 0.5 + 0.2 * (1.0 - 0.75) = 0.4 + 0.05 = 0.45
     assert!((spore.frustration - 0.45).abs() < 0.001);
 }
+
+#[test]
+fn test_learn_increases_weights_on_positive_dopamine() {
+    let mut spore = Spore::new();
+    spore.dopamine = 0.5;
+    spore.learning_rate = 0.5;
+
+    // Set a trace
+    spore.traces_ih[0][0] = 1.0;
+    let original_weight = spore.weights_ih[0][0];
+
+    // Run many learn cycles to accumulate stochastic changes
+    for _ in 0..100 {
+        spore.dopamine = 0.5;
+        spore.traces_ih[0][0] = 1.0;
+        spore.learn();
+    }
+
+    // Weight should have increased (statistically)
+    assert!(spore.weights_ih[0][0] > original_weight,
+        "Weight should increase with positive dopamine. Was {}, now {}",
+        original_weight, spore.weights_ih[0][0]);
+}
+
+#[test]
+fn test_learn_decreases_weights_on_negative_dopamine() {
+    let mut spore = Spore::new();
+    spore.learning_rate = 0.5;
+
+    // Set a trace and a starting weight
+    spore.traces_ih[0][0] = 1.0;
+    spore.weights_ih[0][0] = 50;  // Start positive
+    let original_weight = spore.weights_ih[0][0];
+
+    // Run many learn cycles with negative dopamine
+    for _ in 0..100 {
+        spore.dopamine = -0.25;
+        spore.traces_ih[0][0] = 1.0;
+        spore.learn();
+    }
+
+    // Weight should have decreased
+    assert!(spore.weights_ih[0][0] < original_weight,
+        "Weight should decrease with negative dopamine. Was {}, now {}",
+        original_weight, spore.weights_ih[0][0]);
+}
+
+#[test]
+fn test_learn_consumes_dopamine() {
+    let mut spore = Spore::new();
+    spore.dopamine = 0.5;
+    spore.traces_ih[0][0] = 1.0;
+
+    spore.learn();
+
+    assert_eq!(spore.dopamine, 0.0, "Dopamine should be consumed after learn");
+}
+
+#[test]
+fn test_learn_does_nothing_with_zero_dopamine() {
+    let mut spore = Spore::new();
+    spore.dopamine = 0.0;
+    spore.traces_ih[0][0] = 1.0;
+    let original_weight = spore.weights_ih[0][0];
+
+    spore.learn();
+
+    assert_eq!(spore.weights_ih[0][0], original_weight,
+        "Weight should not change with zero dopamine");
+}
+
+#[test]
+fn test_learn_does_nothing_with_zero_trace() {
+    let mut spore = Spore::new();
+    spore.dopamine = 0.5;
+    spore.traces_ih[0][0] = 0.0;  // No trace
+    let original_weight = spore.weights_ih[0][0];
+
+    spore.learn();
+
+    assert_eq!(spore.weights_ih[0][0], original_weight,
+        "Weight should not change with zero trace");
+}
+
+#[test]
+fn test_learn_threshold_decreases_on_positive_dopamine() {
+    let mut spore = Spore::new();
+    spore.learning_rate = 0.5;
+    spore.thresholds_h[0] = 50;
+
+    // Run many cycles
+    for _ in 0..100 {
+        spore.dopamine = 0.5;
+        spore.traces_th[0] = 1.0;
+        spore.learn();
+    }
+
+    // Threshold should decrease (neuron becomes more eager)
+    assert!(spore.thresholds_h[0] < 50,
+        "Threshold should decrease with positive dopamine");
+}
+
+#[test]
+fn test_learn_threshold_increases_on_negative_dopamine() {
+    let mut spore = Spore::new();
+    spore.learning_rate = 0.5;
+    spore.thresholds_h[0] = 0;
+
+    for _ in 0..100 {
+        spore.dopamine = -0.25;
+        spore.traces_th[0] = 1.0;
+        spore.learn();
+    }
+
+    // Threshold should increase (neuron becomes more stubborn)
+    assert!(spore.thresholds_h[0] > 0,
+        "Threshold should increase with negative dopamine");
+}
