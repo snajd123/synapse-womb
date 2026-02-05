@@ -70,7 +70,8 @@ This enables true parallelism and is more biologically realistic.
 ### 3.1 The Spore
 
 ```rust
-const DEFAULT_THRESHOLD: i16 = 50;
+const DEFAULT_THRESHOLD: i16 = 50;     // Homeostasis target (not init value!)
+const INIT_THRESHOLD: i16 = 0;        // Fix 5: Start "trigger happy"
 const PIPELINE_LATENCY: usize = 2;
 const MAX_WEIGHT_SUM: i32 = 400;      // Per-neuron weight budget (Fix 1)
 const BASELINE_ACCURACY: f32 = 0.5;   // Below this = punishment (Fix 3)
@@ -81,8 +82,9 @@ struct Spore {
     weights_ho: [[i16; 32]; 8],   // Hidden → Output (256 weights)
 
     // Per-neuron thresholds (learnable)
-    thresholds_h: [i16; 32],
-    thresholds_o: [i16; 8],
+    // Fix 5: Initialize to INIT_THRESHOLD (0), NOT DEFAULT_THRESHOLD (50)
+    thresholds_h: [i16; 32],      // init: [0; 32] (trigger happy)
+    thresholds_o: [i16; 8],       // init: [0; 8]  (trigger happy)
 
     // Eligibility traces (same shape as weights)
     traces_ih: [[f32; 8]; 32],
@@ -123,6 +125,38 @@ struct Environment {
     ticks_on_current: u64,
 }
 ```
+
+### 3.3 Initialization: "The Spark" (Fix 5)
+
+**The Bootstrap Problem:** Random weights average to 0. If threshold = 50, nothing fires. No traces. No learning. Dead Spore.
+
+**The Solution:** Start "trigger happy" and prune to precision.
+
+```rust
+fn new_spore() -> Spore {
+    Spore {
+        // Random weights in [-50, 50]
+        weights_ih: random_weights(),
+        weights_ho: random_weights(),
+
+        // Fix 5: Thresholds start at 0, NOT 50
+        // This makes neurons fire at everything (epilepsy)
+        thresholds_h: [INIT_THRESHOLD; 32],  // [0; 32]
+        thresholds_o: [INIT_THRESHOLD; 8],   // [0; 8]
+
+        // ... rest initialized to zero/false ...
+        frustration: 1.0,  // Start fully frustrated (exploring)
+    }
+}
+```
+
+**The Lifecycle:**
+1. **Birth:** Everything fires (epileptic chaos)
+2. **Learning:** Useful paths get rewarded → thresholds drop further, weights strengthen
+3. **Homeostasis:** Thresholds drift UP toward 50 → only strong pathways survive
+4. **Maturity:** Precise firing, low noise, high accuracy
+
+This is "Start Hot, Cool to Precision" - the opposite of trying to wake a dead network.
 
 ---
 
@@ -463,3 +497,4 @@ After Phase 1 succeeds:
 | Exploration kicks in too late | Frustration EMA too slow | **Fix 2:** Check instant spike on accuracy < 0.5 |
 | Bad pathways persist forever | Positive-only learning | **Fix 3:** Check signed dopamine (anti-Hebbian) |
 | Accuracy stuck at ~12% (noise) | Superstitious learning | **Fix 4:** Increase input_hold_ticks (must be >> latency) |
+| Nothing fires, accuracy = random | Dead Spore bootstrap | **Fix 5:** Init thresholds to 0, not 50 (start hot) |
