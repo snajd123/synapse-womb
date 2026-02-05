@@ -1,0 +1,19 @@
+[package]
+name = "spore-sim"
+version = "0.1.0"
+edition = "2021"
+description = "Spore Mirror Experiment - Hebbian learning proof of concept"
+
+[dependencies]
+rand = "0.8"
+
+[dev-dependencies]
+# None needed yet
+
+[[bin]]
+name = "spore-sim"
+path = "src/main.rs"
+
+[lib]
+name = "spore_sim"
+path = "src/lib.rs"
