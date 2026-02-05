@@ -13,6 +13,7 @@
 //!   --hold N          Input hold ticks (default: 50)
 //!   --log-interval N  Log every N ticks (default: 1000)
 //!   --quiet           Suppress logging
+//!   --dump-weights    Show ASCII weight visualization at end
 
 use spore_sim::simulation::Simulation;
 use spore_sim::constants::*;
@@ -28,6 +29,7 @@ fn main() {
     let mut input_hold_ticks: u64 = DEFAULT_INPUT_HOLD_TICKS as u64;
     let mut log_interval: u64 = 1000;
     let mut quiet = false;
+    let mut dump_weights = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -54,6 +56,9 @@ fn main() {
             }
             "--quiet" => {
                 quiet = true;
+            }
+            "--dump-weights" => {
+                dump_weights = true;
             }
             "--help" | "-h" => {
                 print_help();
@@ -110,6 +115,13 @@ fn main() {
     let actual_log_interval = if quiet { 0 } else { log_interval };
     let final_accuracy = sim.run(max_ticks, actual_log_interval);
 
+    // Dump weights if requested
+    if dump_weights {
+        println!();
+        println!("WEIGHT VISUALIZATION:");
+        sim.spore().dump_weights_ascii();
+    }
+
     // Report results
     println!();
     println!("========================================");
@@ -147,5 +159,6 @@ fn print_help() {
     println!("  --hold N          Input hold ticks (default: 50)");
     println!("  --log-interval N  Log every N ticks (default: 1000)");
     println!("  --quiet           Suppress logging");
+    println!("  --dump-weights    Show ASCII weight visualization at end");
     println!("  --help, -h        Show this help");
 }

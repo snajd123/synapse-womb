@@ -446,6 +446,49 @@ impl Spore {
             *t *= self.trace_decay;
         }
     }
+
+    /// Dump weights as a simple ASCII visualization.
+    ///
+    /// Shows Input→Hidden weights as a 32x8 grid where each cell
+    /// is a character representing weight magnitude.
+    pub fn dump_weights_ascii(&self) {
+        println!("Input→Hidden Weights (32 rows x 8 cols):");
+        println!("  01234567");
+        for h in 0..HIDDEN_SIZE {
+            print!("{:2} ", h);
+            for i in 0..INPUT_SIZE {
+                let w = self.weights_ih[h][i];
+                let c = if w > 100 { '█' }
+                    else if w > 50 { '▓' }
+                    else if w > 0 { '▒' }
+                    else if w > -50 { '░' }
+                    else { ' ' };
+                print!("{}", c);
+            }
+            println!();
+        }
+        println!();
+
+        println!("Hidden→Output Weights (8 rows x 32 cols):");
+        print!("   ");
+        for h in 0..HIDDEN_SIZE {
+            print!("{}", h % 10);
+        }
+        println!();
+        for o in 0..OUTPUT_SIZE {
+            print!("{}: ", o);
+            for h in 0..HIDDEN_SIZE {
+                let w = self.weights_ho[o][h];
+                let c = if w > 100 { '█' }
+                    else if w > 50 { '▓' }
+                    else if w > 0 { '▒' }
+                    else if w > -50 { '░' }
+                    else { ' ' };
+                print!("{}", c);
+            }
+            println!();
+        }
+    }
 }
 
 impl Default for Spore {
