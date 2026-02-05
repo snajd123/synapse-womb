@@ -1883,8 +1883,10 @@ fn test_environment_with_params() {
 #[test]
 fn test_environment_input_history_initialized() {
     let env = Environment::new(0);
-    // Input history should have PIPELINE_LATENCY + 1 entries
-    assert_eq!(env.input_history_len(), PIPELINE_LATENCY + 1);
+    // Input history should have exactly PIPELINE_LATENCY entries (NOT +1!)
+    // At tick T, we judge against input from tick T-PIPELINE_LATENCY.
+    // History contains [input_{T-L}, input_{T-L+1}, ..., input_{T-1}] = L entries
+    assert_eq!(env.input_history_len(), PIPELINE_LATENCY);
 }
 
 #[test]
@@ -1957,10 +1959,13 @@ impl Environment {
         let mut rng = rand::thread_rng();
         let current_input = rng.gen::<u8>();
 
-        // Pre-fill input history so we don't underflow
-        // Need PIPELINE_LATENCY + 1 entries
-        let mut input_history = VecDeque::with_capacity(PIPELINE_LATENCY + 1);
-        for _ in 0..=PIPELINE_LATENCY {
+        // Pre-fill input history for pipeline-aware judging
+        // Need exactly PIPELINE_LATENCY entries (NOT +1!)
+        // At tick T, history[0] = input from tick T-PIPELINE_LATENCY
+        // After tick T: pop history[0], push input_T
+        // History length stays constant at PIPELINE_LATENCY
+        let mut input_history = VecDeque::with_capacity(PIPELINE_LATENCY);
+        for _ in 0..PIPELINE_LATENCY {
             input_history.push_back(current_input);
         }
 
@@ -2359,16 +2364,20 @@ impl Simulation {
     /// 7. LEARN: Apply Hebbian update
     /// 8. MAINTAIN: Weight decay, normalization, threshold drift
     pub fn step(&mut self) {
-        // 1. SENSE
-        let input = self.env.get_input();
-
-        // 2. PROPAGATE
-        self.spore.propagate(input);
-
-        // 3. TICK_END (advance pipeline, decay traces)
+        // 1. TICK_END FIRST (advance pipeline, decay traces)
+        // This MUST happen before propagate for correct 2-tick latency!
+        // - Swaps hidden_next → hidden, output_next → output
+        // - Decays traces from previous tick
         self.spore.tick_end();
 
-        // 4. OUTPUT
+        // 2. SENSE
+        let input = self.env.get_input();
+
+        // 3. PROPAGATE (compute new states, set fresh traces)
+        self.spore.propagate(input);
+
+        // 4. OUTPUT (reads from buffer swapped in step 1)
+        // This output reflects input from 2 ticks ago (PIPELINE_LATENCY = 2)
         let output = self.spore.output_as_byte();
 
         // 5. ENVIRONMENT STEP
