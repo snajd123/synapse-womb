@@ -163,6 +163,81 @@ impl Spore {
             max_noise_boost,
         }
     }
+
+    /// Propagate input through the network (one tick).
+    ///
+    /// This implements pipelined propagation:
+    /// - Input → Hidden: writes to hidden_next
+    /// - Hidden → Output: reads from hidden (last tick), writes to output_next
+    ///
+    /// Traces are set to 1.0 for synapses that participate in firing.
+    ///
+    /// # Arguments
+    /// * `input` - The input byte (each bit is one input neuron)
+    pub fn propagate(&mut self, input: u8) {
+        use rand::Rng;
+        let mut rng = rand::thread_rng();
+
+        // Calculate current noise rate based on frustration
+        let noise_rate = self.base_noise + (self.frustration * self.max_noise_boost);
+
+        // ====================================================================
+        // INPUT → HIDDEN (writes to hidden_next)
+        // ====================================================================
+        for h in 0..HIDDEN_SIZE {
+            // Compute weighted sum of inputs
+            let mut sum: i32 = 0;
+            for i in 0..INPUT_SIZE {
+                let bit = ((input >> i) & 1) as i32;
+                sum += bit * self.weights_ih[h][i] as i32;
+            }
+
+            // Hard threshold with noise injection
+            let fires = sum > self.thresholds_h[h] as i32
+                || rng.gen::<f32>() < noise_rate;
+
+            self.hidden_next[h] = fires;
+
+            // Set traces for synapses that contributed to firing
+            if fires {
+                for i in 0..INPUT_SIZE {
+                    if (input >> i) & 1 == 1 {
+                        self.traces_ih[h][i] = 1.0;
+                    }
+                }
+                self.traces_th[h] = 1.0;  // Threshold trace
+            }
+        }
+
+        // ====================================================================
+        // HIDDEN → OUTPUT (reads from hidden, writes to output_next)
+        // Note: Uses hidden (last tick), NOT hidden_next (this tick)
+        // This is the pipelined behavior.
+        // ====================================================================
+        for o in 0..OUTPUT_SIZE {
+            // Compute weighted sum of hidden activations
+            let mut sum: i32 = 0;
+            for h in 0..HIDDEN_SIZE {
+                sum += self.hidden[h] as i32 * self.weights_ho[o][h] as i32;
+            }
+
+            // Hard threshold with noise injection
+            let fires = sum > self.thresholds_o[o] as i32
+                || rng.gen::<f32>() < noise_rate;
+
+            self.output_next[o] = fires;
+
+            // Set traces for synapses that contributed to firing
+            if fires {
+                for h in 0..HIDDEN_SIZE {
+                    if self.hidden[h] {
+                        self.traces_ho[o][h] = 1.0;
+                    }
+                }
+                self.traces_to[o] = 1.0;  // Threshold trace
+            }
+        }
+    }
 }
 
 impl Default for Spore {
