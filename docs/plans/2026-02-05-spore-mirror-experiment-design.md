@@ -72,6 +72,8 @@ This enables true parallelism and is more biologically realistic.
 ```rust
 const DEFAULT_THRESHOLD: i16 = 50;
 const PIPELINE_LATENCY: usize = 2;
+const MAX_WEIGHT_SUM: i32 = 400;      // Per-neuron weight budget (Fix 1)
+const BASELINE_ACCURACY: f32 = 0.5;   // Below this = punishment (Fix 3)
 
 struct Spore {
     // Network topology: 8-32-8
@@ -141,12 +143,18 @@ let fires = sum > threshold || random::<f32>() < noise_rate;
 ### 4.2 Noise (Frustration-Driven Exploration)
 
 ```rust
-frustration = 0.9 * frustration + 0.1 * (1.0 - accuracy);
+// Fix 2: Fast frustration response - biology doesn't wait to feel pain
+if accuracy < 0.5 {
+    frustration = 1.0;  // Instant spike on bad result
+} else {
+    frustration = 0.8 * frustration + 0.2 * (1.0 - accuracy);  // Faster EMA (0.2 not 0.1)
+}
 noise_rate = base_noise + (frustration * max_noise_boost);
 ```
 
-- When succeeding: frustration → 0, network is "calm"
-- When failing: frustration → 1, network is "frantic" (explores more)
+- When succeeding: frustration decays, network is "calm"
+- When failing badly (< 50%): frustration spikes immediately to max
+- EMA window shortened to react within ~5 ticks, not 10
 
 ### 4.3 Reward Signal
 
@@ -178,40 +186,61 @@ trace *= trace_decay;  // 0.9 default
 
 Traces are the "chemical residue" - memory of what just fired.
 
-### 4.5 Hebbian Learning
+### 4.5 Hebbian Learning (with Anti-Hebbian)
 
 ```rust
-fn learn(&mut self, tick: u64) {
-    if self.dopamine < 0.001 { return; }
+fn receive_reward(&mut self, correct_bits: u8) {
+    let accuracy = correct_bits as f32 / 8.0;
 
-    let lr_scaled = self.learning_rate * 100.0;  // Scale for integer math
-    let d = self.dopamine;
+    // Fix 3: Signed dopamine - below baseline = punishment
+    // dopamine ranges from -0.25 (0% accuracy) to +1.0 (100% accuracy)
+    let reward = accuracy * accuracy;                    // 0.0 to 1.0
+    let baseline_reward = BASELINE_ACCURACY * BASELINE_ACCURACY;  // 0.25
+    self.dopamine = reward - baseline_reward;            // -0.25 to +0.75
+
+    // Frustration update (Fix 2: instant spike on bad result)
+    if accuracy < 0.5 {
+        self.frustration = 1.0;
+    } else {
+        self.frustration = 0.8 * self.frustration + 0.2 * (1.0 - accuracy);
+    }
+}
+
+fn learn(&mut self, tick: u64) {
+    if self.dopamine.abs() < 0.001 { return; }
+
+    let lr_scaled = self.learning_rate * 100.0;
+    let d = self.dopamine;  // Can be negative!
 
     for each synapse {
         let change = lr_scaled * d * trace;
         let delta = stochastic_round(change);
+        // Fix 3: saturating_add works for negative delta too
         weight = weight.saturating_add(delta);
     }
 
     for each threshold {
-        // Thresholds DECREASE when rewarded (neuron becomes more eager)
+        let t_delta = stochastic_round(lr_scaled * d * t_trace);
+        // Positive d = lower threshold (eager), Negative d = raise threshold (stubborn)
         threshold = threshold.saturating_sub(t_delta);
     }
 
-    // Consume dopamine (one reward = one update)
     self.dopamine = 0.0;
 }
 
 fn stochastic_round(value: f32) -> i16 {
-    let floor = value as i16;
-    let frac = value.fract();
-    if random::<f32>() < frac { floor + 1 } else { floor }
+    let sign = value.signum() as i16;
+    let abs_val = value.abs();
+    let floor = abs_val as i16;
+    let frac = abs_val.fract();
+    sign * (floor + if random::<f32>() < frac { 1 } else { 0 })
 }
 ```
 
 **Key fixes applied:**
 - Stochastic rounding prevents small deltas from truncating to zero
 - Dopamine consumed after learning (atomic updates)
+- **Fix 3:** Signed dopamine - accuracy below 50% baseline actively weakens synapses (Anti-Hebbian)
 
 ### 4.6 Homeostasis (Preventing Runaway)
 
@@ -221,6 +250,27 @@ fn maintain(&mut self, tick: u64) {
     if tick % 100 == 0 {
         for w in all_weights {
             *w -= *w >> 6;
+        }
+    }
+
+    // Fix 1: Weight Normalization (per-neuron budget)
+    // Each neuron has a finite "synaptic energy" to distribute
+    for h in 0..32 {
+        let sum: i32 = self.weights_ih[h].iter().map(|&w| w.abs() as i32).sum();
+        if sum > MAX_WEIGHT_SUM {
+            let scale = MAX_WEIGHT_SUM as f32 / sum as f32;
+            for w in &mut self.weights_ih[h] {
+                *w = (*w as f32 * scale) as i16;
+            }
+        }
+    }
+    for o in 0..8 {
+        let sum: i32 = self.weights_ho[o].iter().map(|&w| w.abs() as i32).sum();
+        if sum > MAX_WEIGHT_SUM {
+            let scale = MAX_WEIGHT_SUM as f32 / sum as f32;
+            for w in &mut self.weights_ho[o] {
+                *w = (*w as f32 * scale) as i16;
+            }
         }
     }
 
@@ -235,6 +285,7 @@ fn maintain(&mut self, tick: u64) {
 **Prevents:**
 - "Screaming neurons" (thresholds hitting minimum)
 - "Crystallized network" (weights saturating at maximum)
+- **Fix 1:** "Hard-wired neurons" - per-neuron weight budget prevents sum from growing unbounded
 
 ---
 
@@ -305,9 +356,23 @@ fn tick(&mut self, tick: u64, spore_output: u8) -> Option<u8> {
 | `base_noise` | 0.001 | 0.1% spontaneous firing |
 | `max_noise_boost` | 0.05 | Up to 5% at max frustration |
 | `reward_latency` | 0 | Start immediate, then increase |
-| `input_hold_ticks` | 20 | How long each input is presented |
+| `input_hold_ticks` | 50 | **Fix 4:** Must be >> PIPELINE + REWARD_LATENCY |
 
-### 6.2 Trace Decay Tuning Table
+### 6.2 Input Hold Timing Constraint (Fix 4)
+
+**Rule:** `input_hold_ticks >= 2 * (PIPELINE_LATENCY + reward_latency) + 10`
+
+This ensures a "clear air" window where reward and input are perfectly aligned.
+
+| reward_latency | min input_hold_ticks | Reasoning |
+|----------------|---------------------|-----------|
+| 0              | 14                  | 2*(2+0)+10 |
+| 5              | 24                  | 2*(2+5)+10 |
+| 10             | 34                  | 2*(2+10)+10 |
+
+**Why this matters:** If input changes while rewards for the *previous* input are still arriving, the Spore learns superstitious associations (Input B → Output A's rewards).
+
+### 6.3 Trace Decay Tuning Table
 
 Rule: `trace^(pipeline + reward_latency)` should be > 0.5
 
@@ -394,3 +459,7 @@ After Phase 1 succeeds:
 | Accuracy stuck at ~40% | Judging wrong input | Check pipeline-aware comparison |
 | Accuracy oscillates wildly | Trace too short for latency | Increase trace_decay |
 | Network goes silent | Thresholds too high | Lower DEFAULT_THRESHOLD or check noise injection |
+| Neurons become "hard-wired 1s" | Weight sum too large | **Fix 1:** Check weight normalization in maintain() |
+| Exploration kicks in too late | Frustration EMA too slow | **Fix 2:** Check instant spike on accuracy < 0.5 |
+| Bad pathways persist forever | Positive-only learning | **Fix 3:** Check signed dopamine (anti-Hebbian) |
+| Accuracy stuck at ~12% (noise) | Superstitious learning | **Fix 4:** Increase input_hold_ticks (must be >> latency) |
