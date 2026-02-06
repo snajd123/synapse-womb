@@ -93,6 +93,13 @@ pub struct Spore {
 
     /// Maximum noise boost at full frustration
     pub max_noise_boost: f32,
+
+    /// EMA alpha for frustration updates (higher = more reactive)
+    /// Only used when accuracy >= 50%; below 50% always spikes to 1.0
+    pub frustration_alpha: f32,
+
+    /// Ticks between weight decay applications
+    pub weight_decay_interval: u64,
 }
 
 impl Spore {
@@ -116,7 +123,25 @@ impl Spore {
         base_noise: f32,
         max_noise_boost: f32,
     ) -> Self {
-        // Initialize weights randomly
+        Self::with_full_params(
+            learning_rate,
+            trace_decay,
+            base_noise,
+            max_noise_boost,
+            0.2,  // Default frustration_alpha
+            WEIGHT_DECAY_INTERVAL as u64,  // Default weight_decay_interval
+        )
+    }
+
+    /// Create a new Spore with all hyperparameters specified.
+    pub fn with_full_params(
+        learning_rate: f32,
+        trace_decay: f32,
+        base_noise: f32,
+        max_noise_boost: f32,
+        frustration_alpha: f32,
+        weight_decay_interval: u64,
+    ) -> Self {
         let mut weights_ih = [[0i16; INPUT_SIZE]; HIDDEN_SIZE];
         let mut weights_ho = [[0i16; HIDDEN_SIZE]; OUTPUT_SIZE];
 
@@ -135,32 +160,24 @@ impl Spore {
         Self {
             weights_ih,
             weights_ho,
-
-            // Fix 5: Initialize thresholds to 0, NOT DEFAULT_THRESHOLD
             thresholds_h: [INIT_THRESHOLD as i16; HIDDEN_SIZE],
             thresholds_o: [INIT_THRESHOLD as i16; OUTPUT_SIZE],
-
-            // All traces start at 0
             traces_ih: [[0.0; INPUT_SIZE]; HIDDEN_SIZE],
             traces_ho: [[0.0; HIDDEN_SIZE]; OUTPUT_SIZE],
             traces_th: [0.0; HIDDEN_SIZE],
             traces_to: [0.0; OUTPUT_SIZE],
-
-            // All activations start false
             hidden: [false; HIDDEN_SIZE],
             hidden_next: [false; HIDDEN_SIZE],
             output: [false; OUTPUT_SIZE],
             output_next: [false; OUTPUT_SIZE],
-
-            // Learning state
             dopamine: 0.0,
-            frustration: 1.0,  // Start fully frustrated (exploring)
-
-            // Hyperparameters
+            frustration: 1.0,
             learning_rate,
             trace_decay,
             base_noise,
             max_noise_boost,
+            frustration_alpha,
+            weight_decay_interval,
         }
     }
 
@@ -277,10 +294,11 @@ impl Spore {
 
         // Fix 2: Fast frustration response
         if accuracy < 0.5 {
-            self.frustration = 1.0;  // Instant spike
+            self.frustration = 1.0;  // Instant spike (non-negotiable)
         } else {
-            // EMA with faster alpha (0.2 instead of 0.1)
-            self.frustration = 0.8 * self.frustration + 0.2 * (1.0 - accuracy);
+            // Tunable EMA for fine-tuning phase
+            self.frustration = (1.0 - self.frustration_alpha) * self.frustration
+                + self.frustration_alpha * (1.0 - accuracy);
         }
     }
 
@@ -359,7 +377,7 @@ impl Spore {
         // ====================================================================
         // WEIGHT DECAY (every WEIGHT_DECAY_INTERVAL ticks)
         // ====================================================================
-        if tick % (WEIGHT_DECAY_INTERVAL as u64) == 0 && tick > 0 {
+        if self.weight_decay_interval > 0 && tick % self.weight_decay_interval == 0 && tick > 0 {
             for row in &mut self.weights_ih {
                 for w in row {
                     *w -= *w >> 6;  // ~1.5% decay

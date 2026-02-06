@@ -529,3 +529,86 @@ fn test_maintain_output_weights_normalized() {
     let sum: i32 = spore.weights_ho[0].iter().map(|&w| w.abs() as i32).sum();
     assert!(sum <= MAX_WEIGHT_SUM, "Sum {} should be <= {}", sum, MAX_WEIGHT_SUM);
 }
+
+// =============================================================================
+// frustration_alpha and weight_decay_interval Tests
+// =============================================================================
+
+#[test]
+fn test_spore_default_frustration_alpha() {
+    let spore = Spore::new();
+    assert_eq!(spore.frustration_alpha, 0.2);
+}
+
+#[test]
+fn test_spore_default_weight_decay_interval() {
+    let spore = Spore::new();
+    assert_eq!(spore.weight_decay_interval, WEIGHT_DECAY_INTERVAL as u64);
+}
+
+#[test]
+fn test_spore_with_full_params() {
+    let spore = Spore::with_full_params(0.1, 0.95, 0.001, 0.03, 0.1, 150);
+    assert_eq!(spore.learning_rate, 0.1);
+    assert_eq!(spore.trace_decay, 0.95);
+    assert_eq!(spore.base_noise, 0.001);
+    assert_eq!(spore.max_noise_boost, 0.03);
+    assert_eq!(spore.frustration_alpha, 0.1);
+    assert_eq!(spore.weight_decay_interval, 150);
+}
+
+#[test]
+fn test_receive_reward_uses_custom_frustration_alpha() {
+    let mut spore = Spore::with_full_params(
+        DEFAULT_LEARNING_RATE as f32,
+        DEFAULT_TRACE_DECAY as f32,
+        DEFAULT_BASE_NOISE as f32,
+        DEFAULT_MAX_NOISE_BOOST as f32,
+        0.1,  // Custom alpha
+        WEIGHT_DECAY_INTERVAL as u64,
+    );
+    spore.frustration = 1.0;
+    spore.receive_reward(8);  // 100% accuracy
+
+    // frustration = (1.0 - 0.1) * 1.0 + 0.1 * (1.0 - 1.0) = 0.9
+    assert!((spore.frustration - 0.9).abs() < 0.001);
+}
+
+#[test]
+fn test_receive_reward_instant_spike_preserved() {
+    // Fix 2 instant spike must work regardless of alpha
+    let mut spore = Spore::with_full_params(
+        DEFAULT_LEARNING_RATE as f32,
+        DEFAULT_TRACE_DECAY as f32,
+        DEFAULT_BASE_NOISE as f32,
+        DEFAULT_MAX_NOISE_BOOST as f32,
+        0.01,  // Very low alpha
+        WEIGHT_DECAY_INTERVAL as u64,
+    );
+    spore.frustration = 0.0;
+    spore.receive_reward(3);  // 37.5% < 50%
+
+    assert_eq!(spore.frustration, 1.0, "Instant spike must still fire");
+}
+
+#[test]
+fn test_maintain_uses_custom_weight_decay_interval() {
+    let mut spore = Spore::with_full_params(
+        DEFAULT_LEARNING_RATE as f32,
+        DEFAULT_TRACE_DECAY as f32,
+        DEFAULT_BASE_NOISE as f32,
+        DEFAULT_MAX_NOISE_BOOST as f32,
+        0.2,
+        50,  // Decay every 50 ticks instead of 100
+    );
+    spore.weights_ih[0][0] = 64;
+
+    // At tick 50, should decay (custom interval)
+    spore.maintain(50);
+    assert_eq!(spore.weights_ih[0][0], 63, "Decay should happen at custom interval");
+
+    // Reset and verify default interval would NOT trigger
+    spore.weights_ih[0][0] = 64;
+    spore.maintain(75);  // Not a multiple of 50
+    assert_eq!(spore.weights_ih[0][0], 64, "No decay at non-interval tick");
+}
