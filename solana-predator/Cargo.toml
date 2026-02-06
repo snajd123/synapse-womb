@@ -25,7 +25,7 @@ reqwest = { version = "0.12", features = ["json"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"], optional = true }
 
 # gRPC (optional)
-tonic = { version = "0.14", optional = true }
+tonic = { version = "0.12.3", features = ["tls"], optional = true }
 yellowstone-grpc-client = { version = "11", optional = true }
 yellowstone-grpc-proto = { version = "11", optional = true }
 
@@ -48,3 +48,7 @@ path = "src/bin/fetch_history.rs"
 [[bin]]
 name = "dojo"
 path = "src/bin/dojo.rs"
+
+[[bin]]
+name = "orca_vaults"
+path = "src/bin/orca_vaults.rs"
