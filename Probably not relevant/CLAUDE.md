@@ -24,6 +24,7 @@ When using the `superpowers:requesting-code-review` skill, the code review agent
 - **Per-tick accuracy**: The tuner uses instantaneous per-tick accuracy from `step()` return value, NOT the EMA `recent_accuracy`.
 - **Convergence revocation**: If accuracy drops below 85%, convergence status is revoked.
 - **Signed dopamine**: Correct → +1.0, Wrong → -cortisol_strength. Single formula for both weights and biases.
+- **Accuracy-Gated Learning Rate**: `effective_lr = lr * (1 - recent_accuracy)`. Converged Spores learn slowly; newborn Spores learn at full speed. Prevents catastrophic forgetting.
 - **Bias NOT decayed**: Biases are structural properties, not transient signals. Weight decay applies only to weights.
 - **Positive initial bias (INITIAL_BIAS = 0.5)**: Prevents "Initial Blackout" — neurons must fire from tick 1 so traces exist for learning. Without this, unlucky random weights → never fires → no traces → learn() does `weight += LR * reward * 0.0` forever.
 - **Target Activity Homeostasis**: `firing_rate` EMA tracks output activity; `maintain()` nudges `bias_o` toward `target_rate` (10%). Silent → bias up. Overactive → bias down. No Spore can stay dead.
