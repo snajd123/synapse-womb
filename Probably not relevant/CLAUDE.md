@@ -31,3 +31,4 @@ When using the `superpowers:requesting-code-review` skill, the code review agent
 - **Winner-Take-All hidden layer**: Only the hidden neuron with the highest sum fires via threshold. Suppressed neurons can fire via noise (exploration). Prevents hidden neuron homogeneity — forces specialization.
 - **Hard threshold everywhere**: Hidden and output neurons use `sum + bias > 0.0`. No sigmoid.
 - **Spore isolation**: Spores do not share weights, traces, or state. Per-bit credit ensures zero interference.
+- **Redundancy and Consensus**: `DEFAULT_SWARM_SIZE = 32` (4 Spores per bit). Each Spore `i` targets bit `i % 8`. Output and accuracy use "best expert wins" — the Spore with highest `recent_accuracy` per bit determines the output. Probability amplification: P(bit fails) = P(stuck)^4.
