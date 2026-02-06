@@ -7,7 +7,7 @@
 
 use anyhow::{bail, Context, Result};
 use clap::Parser;
-use solana_predator::record::{write_record, Record};
+use solana_predator::record::{write_record, write_dual_record, Record, DualRecord, AMM_DATA_SIZE};
 use solana_predator::source::{AccountUpdate, MarketConfig, Source};
 use std::fs::OpenOptions;
 use std::io::BufWriter;
@@ -15,8 +15,8 @@ use tokio::sync::mpsc;
 
 /// Offset of the `amount` field (u64 LE) in an SPL Token Account.
 const TOKEN_AMOUNT_OFFSET: usize = 64;
-/// Minimum SPL Token Account data size.
-const TOKEN_ACCOUNT_SIZE: usize = 165;
+/// Minimum SPL Token Account data size (Legacy=165, Token-2022 can be 82).
+const TOKEN_ACCOUNT_SIZE: usize = 82;
 /// Seconds to wait before reconnecting after a disconnect.
 const RECONNECT_DELAY_SECS: u64 = 3;
 /// Channel buffer size for account updates from the source.
@@ -51,6 +51,18 @@ struct Args {
     #[arg(long)]
     pc_vault: String,
 
+    /// Orca Whirlpool account address (base58). If set, enables dual-pool mode.
+    #[arg(long)]
+    orca_pool: Option<String>,
+
+    /// Orca SOL vault token account (base58). Required if --orca-pool is set.
+    #[arg(long)]
+    orca_coin_vault: Option<String>,
+
+    /// Orca USDC vault token account (base58). Required if --orca-pool is set.
+    #[arg(long)]
+    orca_pc_vault: Option<String>,
+
     /// Output file path
     #[arg(long, short, default_value = "market_vibrations.bin")]
     output: String,
@@ -73,7 +85,7 @@ fn flush_record(
     pending_amm: &mut Option<(u64, Vec<u8>)>,
     coin_balance: u64,
     pc_balance: u64,
-    record_tx: &mpsc::Sender<Record>,
+    record_tx: &mpsc::Sender<RecordMessage>,
     record_count: &mut u64,
 ) {
     if let Some((slot, data)) = pending_amm.take() {
@@ -87,13 +99,19 @@ fn flush_record(
             );
         }
 
-        if record_tx.try_send(record).is_err() {
+        if record_tx.try_send(RecordMessage::Single(record)).is_err() {
             eprintln!(
                 "  WARNING: Writer backpressure, record dropped at slot {}",
                 slot
             );
         }
     }
+}
+
+/// Message sent to the background writer (either single or dual record).
+enum RecordMessage {
+    Single(Record),
+    Dual(DualRecord),
 }
 
 fn build_source(name: &str) -> Result<Source> {
@@ -126,14 +144,27 @@ async fn main() -> Result<()> {
     let args = Args::parse();
     let source = build_source(&args.source)?;
 
+    let dual_mode = args.orca_pool.is_some();
+    if dual_mode {
+        if args.orca_coin_vault.is_none() || args.orca_pc_vault.is_none() {
+            bail!("--orca-pool requires --orca-coin-vault and --orca-pc-vault");
+        }
+    }
+
     eprintln!("========================================");
     eprintln!("  SOLANA SNIFFER -- Data Capture");
     eprintln!("========================================");
     eprintln!("  Source:     {}", args.source);
     eprintln!("  Endpoint:   {}", args.endpoint);
+    eprintln!("  Mode:       {}", if dual_mode { "DUAL (Raydium + Orca)" } else { "SINGLE (Raydium)" });
     eprintln!("  Pool (AMM): {}", args.pool);
     eprintln!("  Coin vault: {}", args.coin_vault);
     eprintln!("  PC vault:   {}", args.pc_vault);
+    if dual_mode {
+        eprintln!("  Orca pool:  {}", args.orca_pool.as_ref().unwrap());
+        eprintln!("  Orca coin:  {}", args.orca_coin_vault.as_ref().unwrap());
+        eprintln!("  Orca pc:    {}", args.orca_pc_vault.as_ref().unwrap());
+    }
     eprintln!("  Output:     {}", args.output);
     eprintln!();
 
@@ -151,18 +182,24 @@ async fn main() -> Result<()> {
         }
     }
 
+    let mut accounts = vec![
+        args.pool.clone(),
+        args.coin_vault.clone(),
+        args.pc_vault.clone(),
+    ];
+    if dual_mode {
+        accounts.push(args.orca_pool.as_ref().unwrap().clone());
+        accounts.push(args.orca_coin_vault.as_ref().unwrap().clone());
+        accounts.push(args.orca_pc_vault.as_ref().unwrap().clone());
+    }
     let config = MarketConfig {
         endpoint: args.endpoint.clone(),
         api_key: args.api_key.clone(),
-        accounts: vec![
-            args.pool.clone(),
-            args.coin_vault.clone(),
-            args.pc_vault.clone(),
-        ],
+        accounts,
     };
 
     // Background writer thread: receives Records over a channel, writes to disk.
-    let (record_tx, mut record_rx) = mpsc::channel::<Record>(WRITER_CHANNEL_SIZE);
+    let (record_tx, mut record_rx) = mpsc::channel::<RecordMessage>(WRITER_CHANNEL_SIZE);
     let output_path = args.output.clone();
 
     let _writer_handle = tokio::task::spawn_blocking(move || -> Result<()> {
@@ -174,9 +211,17 @@ async fn main() -> Result<()> {
         let mut writer = BufWriter::new(file);
         let mut count: u64 = 0;
 
-        while let Some(record) = record_rx.blocking_recv() {
-            write_record(&mut writer, &record)
-                .with_context(|| "Failed to write record")?;
+        while let Some(msg) = record_rx.blocking_recv() {
+            match msg {
+                RecordMessage::Single(record) => {
+                    write_record(&mut writer, &record)
+                        .with_context(|| "Failed to write record")?;
+                }
+                RecordMessage::Dual(dual) => {
+                    write_dual_record(&mut writer, &dual)
+                        .with_context(|| "Failed to write dual record")?;
+                }
+            }
             count += 1;
             if count % 100 == 0 {
                 eprintln!("  [writer] {} records flushed to disk", count);
@@ -204,6 +249,13 @@ async fn main() -> Result<()> {
         let mut pc_slot: u64 = 0;
         let mut pending_amm: Option<(u64, Vec<u8>)> = None;
 
+        // Orca state (only used in dual mode)
+        let mut orca_pending: Option<(u64, Vec<u8>)> = None;
+        let mut orca_coin_balance: u64 = 0;
+        let mut orca_pc_balance: u64 = 0;
+        let mut orca_coin_slot: u64 = 0;
+        let mut orca_pc_slot: u64 = 0;
+
         let (update_tx, mut update_rx) = mpsc::channel::<AccountUpdate>(UPDATE_CHANNEL_SIZE);
 
         let source_clone = source.clone();
@@ -222,6 +274,8 @@ async fn main() -> Result<()> {
 
         // Process updates from the source (source-agnostic).
         while let Some(update) = update_rx.recv().await {
+            // Route update to the correct handler via a single if/else chain
+            // to avoid moving `update.data` twice.
             if update.pubkey == args.coin_vault {
                 if update.data.len() >= TOKEN_ACCOUNT_SIZE {
                     if let Some(amount) = extract_token_amount(&update.data) {
@@ -237,9 +291,7 @@ async fn main() -> Result<()> {
                     }
                 }
             } else if update.pubkey == args.pool {
-                // Flush any older buffered AMM with best-available vault data
-                // rather than dropping it entirely.
-                if pending_amm.is_some() {
+                if !dual_mode && pending_amm.is_some() {
                     flush_record(
                         &mut pending_amm,
                         coin_balance,
@@ -249,18 +301,92 @@ async fn main() -> Result<()> {
                     );
                 }
                 pending_amm = Some((update.slot, update.data));
+            } else if dual_mode {
+                // Orca updates (only reachable in dual mode)
+                let orca_cv = args.orca_coin_vault.as_ref().unwrap();
+                let orca_pv = args.orca_pc_vault.as_ref().unwrap();
+                let orca_pool_addr = args.orca_pool.as_ref().unwrap();
+
+                if update.pubkey == *orca_cv {
+                    if update.data.len() >= TOKEN_ACCOUNT_SIZE {
+                        if let Some(amount) = extract_token_amount(&update.data) {
+                            orca_coin_balance = amount;
+                            orca_coin_slot = update.slot;
+                        }
+                    }
+                } else if update.pubkey == *orca_pv {
+                    if update.data.len() >= TOKEN_ACCOUNT_SIZE {
+                        if let Some(amount) = extract_token_amount(&update.data) {
+                            orca_pc_balance = amount;
+                            orca_pc_slot = update.slot;
+                        }
+                    }
+                } else if update.pubkey == *orca_pool_addr {
+                    orca_pending = Some((update.slot, update.data));
+                }
             }
 
-            // After any update, try to flush pending AMM if vaults have caught up.
-            if let Some((amm_slot, _)) = &pending_amm {
-                if coin_slot >= *amm_slot && pc_slot >= *amm_slot {
-                    flush_record(
-                        &mut pending_amm,
-                        coin_balance,
-                        pc_balance,
-                        &record_tx,
-                        &mut record_count,
-                    );
+            // --- Flush logic ---
+            if dual_mode {
+                // Dual-pool flush: both pools must have pending + vaults caught up
+                if let (Some((ray_slot, _)), Some((orca_slot, _))) = (&pending_amm, &orca_pending) {
+                    let all_caught_up = coin_slot >= *ray_slot
+                        && pc_slot >= *ray_slot
+                        && orca_coin_slot >= *orca_slot
+                        && orca_pc_slot >= *orca_slot;
+
+                    if all_caught_up {
+                        let (ray_s, ray_data) = pending_amm.take().unwrap();
+                        let (_orca_s, orca_data) = orca_pending.take().unwrap();
+                        let dr = DualRecord {
+                            slot: ray_s,
+                            ray_amm_data: {
+                                let mut d = [0u8; AMM_DATA_SIZE];
+                                let len = ray_data.len().min(AMM_DATA_SIZE);
+                                d[..len].copy_from_slice(&ray_data[..len]);
+                                d
+                            },
+                            ray_coin: coin_balance,
+                            ray_pc: pc_balance,
+                            orca_data: {
+                                let mut d = [0u8; AMM_DATA_SIZE];
+                                let len = orca_data.len().min(AMM_DATA_SIZE);
+                                d[..len].copy_from_slice(&orca_data[..len]);
+                                d
+                            },
+                            orca_coin: orca_coin_balance,
+                            orca_pc: orca_pc_balance,
+                        };
+
+                        record_count += 1;
+                        if record_count % 100 == 0 {
+                            eprintln!(
+                                "  DualRecords: {} | Slot: {} | Ray: ~{:.2} | Orca: ~{:.2}",
+                                record_count, ray_s,
+                                dr.ray_price(9, 6), dr.orca_price(9, 6),
+                            );
+                        }
+
+                        if record_tx.try_send(RecordMessage::Dual(dr)).is_err() {
+                            eprintln!(
+                                "  WARNING: Writer backpressure, dual record dropped at slot {}",
+                                ray_s
+                            );
+                        }
+                    }
+                }
+            } else {
+                // Single-pool flush: flush pending AMM if vaults have caught up
+                if let Some((amm_slot, _)) = &pending_amm {
+                    if coin_slot >= *amm_slot && pc_slot >= *amm_slot {
+                        flush_record(
+                            &mut pending_amm,
+                            coin_balance,
+                            pc_balance,
+                            &record_tx,
+                            &mut record_count,
+                        );
+                    }
                 }
             }
         }
