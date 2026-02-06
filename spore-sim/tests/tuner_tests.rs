@@ -1,4 +1,4 @@
-use spore_sim::tuner::{Genome, EvalResult, TunerConfig, evaluate_fast, evaluate_full};
+use spore_sim::tuner::{Genome, TunerConfig, evaluate_fast, evaluate_full};
 
 #[test]
 fn test_genome_random_in_range() {
