@@ -11,8 +11,8 @@ fn test_spore_construction() {
     assert_eq!(s.weights_ih.len(), HIDDEN_SIZE);
     assert_eq!(s.weights_ih[0].len(), INPUT_SIZE);
     assert_eq!(s.weights_ho.len(), HIDDEN_SIZE);
-    assert_eq!(s.bias_h, [0.0; HIDDEN_SIZE]);
-    assert_eq!(s.bias_o, 0.0);
+    assert_eq!(s.bias_h, [INITIAL_BIAS; HIDDEN_SIZE]);
+    assert_eq!(s.bias_o, INITIAL_BIAS);
 }
 
 #[test]
@@ -349,8 +349,8 @@ fn test_reset_clears_state() {
     assert_eq!(s.recent_accuracy, 0.0);
     assert_eq!(s.dopamine, 0.0);
     assert_eq!(s.traces_ih[0][0], 0.0);
-    assert_eq!(s.bias_h[0], 0.0);
-    assert_eq!(s.bias_o, 0.0);
+    assert_eq!(s.bias_h[0], INITIAL_BIAS);
+    assert_eq!(s.bias_o, INITIAL_BIAS);
     assert_eq!(s.output, false);
 }
 

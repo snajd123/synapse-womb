@@ -25,6 +25,12 @@ pub const HIDDEN_SIZE: usize = 4;
 /// Range for random weight initialization: uniform in [-WEIGHT_INIT_RANGE, +WEIGHT_INIT_RANGE].
 pub const WEIGHT_INIT_RANGE: f32 = 0.5;
 
+/// Initial bias for all neurons. Positive so neurons fire from tick 1,
+/// giving traces for learning. Cortisol carves away wrong firings.
+/// Without this, neurons with unlucky random weights never fire,
+/// never set traces, and learn() does weight += LR * reward * 0.0 forever.
+pub const INITIAL_BIAS: f32 = 0.5;
+
 // =============================================================================
 // Learning Parameters
 // =============================================================================

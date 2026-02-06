@@ -115,8 +115,8 @@ impl Spore {
         Self {
             weights_ih,
             weights_ho,
-            bias_h: [0.0; HIDDEN_SIZE],
-            bias_o: 0.0,
+            bias_h: [INITIAL_BIAS; HIDDEN_SIZE],
+            bias_o: INITIAL_BIAS,
             traces_ih: [[0.0; INPUT_SIZE]; HIDDEN_SIZE],
             traces_ho: [0.0; HIDDEN_SIZE],
             trace_bias_h: [0.0; HIDDEN_SIZE],
@@ -321,8 +321,8 @@ impl Spore {
             self.weights_ho[j] = random_weight();
         }
 
-        self.bias_h = [0.0; HIDDEN_SIZE];
-        self.bias_o = 0.0;
+        self.bias_h = [INITIAL_BIAS; HIDDEN_SIZE];
+        self.bias_o = INITIAL_BIAS;
         self.traces_ih = [[0.0; INPUT_SIZE]; HIDDEN_SIZE];
         self.traces_ho = [0.0; HIDDEN_SIZE];
         self.trace_bias_h = [0.0; HIDDEN_SIZE];
