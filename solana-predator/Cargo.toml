@@ -22,3 +22,7 @@ path = "src/bin/sniffer.rs"
 [[bin]]
 name = "reader"
 path = "src/bin/reader.rs"
+
+[[bin]]
+name = "mockgen"
+path = "src/bin/mockgen.rs"
