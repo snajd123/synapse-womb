@@ -52,14 +52,15 @@ impl Swarm {
     ///
     /// Returns mean accuracy across all Spores for this tick.
     pub fn tick(&mut self, inputs: &[f32; INPUT_SIZE], targets: &[bool], tick: u64) -> f32 {
+        let n_bits = targets.len();
         let mut correct_count: usize = 0;
 
         for (i, spore) in self.spores.iter_mut().enumerate() {
             // 1. Fire
             let output = spore.fire(inputs);
 
-            // 2. Per-bit credit assignment
-            let correct = output == targets[i];
+            // 2. Per-bit credit assignment (Spore i targets bit i % n_bits)
+            let correct = output == targets[i % n_bits];
             if correct {
                 correct_count += 1;
             }

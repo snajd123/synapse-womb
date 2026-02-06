@@ -3,9 +3,9 @@ use spore_sim::constants::*;
 
 #[test]
 fn test_swarm_construction() {
-    let swarm = Swarm::new(8, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
-    assert_eq!(swarm.size(), 8);
-    assert_eq!(swarm.spores.len(), 8);
+    let swarm = Swarm::new(32, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
+    assert_eq!(swarm.size(), 32);
+    assert_eq!(swarm.spores.len(), 32);
 }
 
 #[test]
@@ -18,17 +18,16 @@ fn test_swarm_different_sizes() {
 
 #[test]
 fn test_swarm_tick_returns_valid_accuracy() {
-    let mut swarm = Swarm::new(8, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
+    let mut swarm = Swarm::new(32, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
     let inputs = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
-    let targets = [true, false, true, false, true, false, true, false];
+    let targets = vec![true, false, true, false, true, false, true, false];
     let accuracy = swarm.tick(&inputs, &targets, 0);
     assert!(accuracy >= 0.0 && accuracy <= 1.0, "Accuracy {} out of range", accuracy);
 }
 
 #[test]
 fn test_swarm_tick_perfect_score_possible() {
-    let mut swarm = Swarm::new(8, 0.1, 0.9, 0.0, 0.0, 0.2, 100, 0.3);
-    // Force all Spores to output true
+    let mut swarm = Swarm::new(32, 0.1, 0.9, 0.0, 0.0, 0.2, 100, 0.3);
     for spore in &mut swarm.spores {
         spore.base_noise = 0.0;
         spore.frustration = 0.0;
@@ -39,7 +38,7 @@ fn test_swarm_tick_perfect_score_possible() {
     }
 
     let inputs = [0.0; INPUT_SIZE];
-    let targets = [true; 8]; // All true
+    let targets = vec![true; 8];
     let accuracy = swarm.tick(&inputs, &targets, 0);
     assert_eq!(accuracy, 1.0, "Should be perfect when all outputs match targets");
 }
@@ -129,4 +128,28 @@ fn test_swarm_per_bit_credit_isolation() {
         "Spore 0 should have learned");
     assert_eq!(swarm.spores[1].weights_ih[0][0], s1_weight_before,
         "Spore 1 should be unaffected");
+}
+
+#[test]
+fn test_swarm_tick_target_mapping_modulo() {
+    let mut swarm = Swarm::new(16, 0.1, 0.9, 0.0, 0.0, 0.2, 100, 0.3);
+    for spore in &mut swarm.spores {
+        spore.base_noise = 0.0;
+        spore.frustration = 0.0;
+    }
+
+    // Force all Spores to output true by setting high biases
+    for spore in &mut swarm.spores {
+        for j in 0..HIDDEN_SIZE {
+            spore.bias_h[j] = 100.0;
+        }
+        spore.bias_o = 100.0;
+    }
+
+    // targets only has 8 elements — tick should use i % 8
+    let inputs = [0.0; INPUT_SIZE];
+    let targets = vec![true; 8];
+    let accuracy = swarm.tick(&inputs, &targets, 0);
+
+    assert_eq!(accuracy, 1.0, "All Spores should match targets[i % 8]");
 }
