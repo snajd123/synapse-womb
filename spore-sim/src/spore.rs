@@ -312,8 +312,8 @@ impl Spore {
     /// Maintenance: decay traces, apply weight decay, activity homeostasis.
     ///
     /// - Traces decay by trace_decay each tick
-    /// - Weights decay by *0.99 every weight_decay_interval ticks
-    /// - Biases are NOT decayed (structural property)
+    /// - Weights AND hidden biases decay by *0.99 every weight_decay_interval ticks
+    /// - Output bias NOT decayed (controlled by homeostasis instead)
     /// - Activity homeostasis: nudge bias_o toward target firing rate
     /// - ticks_alive incremented for rejuvenation tracking
     pub fn maintain(&mut self, tick: u64) {
@@ -350,7 +350,12 @@ impl Spore {
             for w in &mut self.weights_ho {
                 *w *= 0.99;
             }
-            // Biases NOT decayed
+            // Hidden biases pulled toward INITIAL_BIAS to prevent runaway.
+            // Caps upside (can't grow to 42+) while protecting downside (can't collapse to 0).
+            // Output bias NOT decayed (controlled by activity homeostasis instead).
+            for b in &mut self.bias_h {
+                *b = *b * 0.99 + INITIAL_BIAS * 0.01;
+            }
         }
     }
 

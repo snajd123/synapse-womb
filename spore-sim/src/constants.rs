@@ -51,13 +51,11 @@ pub const DEFAULT_BASE_NOISE: f32 = 0.001;
 /// Default maximum noise boost at full frustration.
 pub const DEFAULT_MAX_NOISE_BOOST: f32 = 0.05;
 
-/// Default cortisol strength (symmetric punishment).
-/// Dopamine is always +1.0; cortisol is 1.0 (symmetric at chance).
-/// This is the mathematically correct value for zero-mean reward at 50%
-/// accuracy: E[d] = 0.5*(+1) + 0.5*(-1) = 0. Only predictive inputs
-/// get net positive weight change. Safe because accuracy-gated LR
-/// prevents catastrophic forgetting at high accuracy.
-pub const DEFAULT_CORTISOL_STRENGTH: f32 = 1.0;
+/// Default cortisol strength (moderate asymmetric punishment).
+/// Dopamine is always +1.0; cortisol = 0.5 provides moderate positive
+/// drift at chance (E[d]=0.25) which bootstraps learning, while hidden
+/// bias decay prevents the drift from causing runaway.
+pub const DEFAULT_CORTISOL_STRENGTH: f32 = 0.5;
 
 // =============================================================================
 // Homeostatic Regulation

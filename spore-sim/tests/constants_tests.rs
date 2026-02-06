@@ -12,7 +12,7 @@ fn test_learning_defaults() {
     assert!((DEFAULT_TRACE_DECAY - 0.9).abs() < 0.001);
     assert!((DEFAULT_BASE_NOISE - 0.001).abs() < 0.0001);
     assert!((DEFAULT_MAX_NOISE_BOOST - 0.05).abs() < 0.001);
-    assert!((DEFAULT_CORTISOL_STRENGTH - 1.0).abs() < 0.001);
+    assert!((DEFAULT_CORTISOL_STRENGTH - 0.5).abs() < 0.001);
 }
 
 #[test]

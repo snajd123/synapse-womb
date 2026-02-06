@@ -36,8 +36,8 @@ pub struct Genome {
     /// Ticks to hold each input pattern. Range: 20 - 200
     pub input_hold_ticks: u64,
 
-    /// Cortisol strength (anti-Hebbian punishment ratio). Range: 0.5 - 1.5
-    /// Default 1.0 (symmetric at chance — zero-mean reward at 50%).
+    /// Cortisol strength (anti-Hebbian punishment ratio). Range: 0.1 - 1.0
+    /// Default 0.5 (moderate positive drift for bootstrapping).
     pub cortisol_strength: f32,
 }
 
@@ -52,7 +52,7 @@ impl Genome {
             weight_decay_interval: rng.gen_range(50..=200),
             frustration_alpha: rng.gen_range(0.05..=0.5),
             input_hold_ticks: rng.gen_range(20..=200),
-            cortisol_strength: rng.gen_range(0.5..=1.5),
+            cortisol_strength: rng.gen_range(0.1..=1.0),
         }
     }
 
@@ -91,7 +91,7 @@ impl Genome {
         }
         if rng.gen::<f32>() < 0.1 {
             self.cortisol_strength += rng.gen_range(-0.05..=0.05) * magnitude_mult;
-            self.cortisol_strength = self.cortisol_strength.clamp(0.5, 1.5);
+            self.cortisol_strength = self.cortisol_strength.clamp(0.1, 1.0);
         }
     }
 

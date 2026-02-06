@@ -472,14 +472,31 @@ fn test_maintain_no_weight_decay_off_interval() {
 }
 
 #[test]
-fn test_maintain_bias_not_decayed() {
+fn test_maintain_hidden_bias_pulled_toward_initial() {
     let mut s = Spore::default_params();
-    s.bias_h[0] = 1.0;
+    // High bias should be pulled DOWN toward INITIAL_BIAS (0.5)
+    s.bias_h[0] = 10.0;
+    s.maintain(DEFAULT_WEIGHT_DECAY_INTERVAL);
+    // new = 10.0 * 0.99 + 0.5 * 0.01 = 9.9 + 0.005 = 9.905
+    assert!((s.bias_h[0] - 9.905).abs() < 0.001,
+        "High hidden bias should decay toward INITIAL_BIAS, got {}", s.bias_h[0]);
+
+    // Low bias should be pulled UP toward INITIAL_BIAS (0.5)
+    let mut s2 = Spore::default_params();
+    s2.bias_h[0] = 0.0;
+    s2.maintain(DEFAULT_WEIGHT_DECAY_INTERVAL);
+    // new = 0.0 * 0.99 + 0.5 * 0.01 = 0.005
+    assert!(s2.bias_h[0] > 0.0,
+        "Low hidden bias should be pulled up toward INITIAL_BIAS, got {}", s2.bias_h[0]);
+}
+
+#[test]
+fn test_maintain_output_bias_not_decayed() {
+    let mut s = Spore::default_params();
     s.bias_o = 1.0;
     // Set firing_rate = target_rate so homeostasis doesn't nudge bias_o
     s.firing_rate = s.target_rate;
     s.maintain(DEFAULT_WEIGHT_DECAY_INTERVAL);
-    assert_eq!(s.bias_h[0], 1.0, "Hidden bias should NOT be decayed");
     assert_eq!(s.bias_o, 1.0, "Output bias should NOT be decayed when at target rate");
 }
 

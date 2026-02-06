@@ -10,7 +10,7 @@ fn test_genome_random_in_range() {
         assert!(g.weight_decay_interval >= 50 && g.weight_decay_interval <= 200);
         assert!(g.frustration_alpha >= 0.05 && g.frustration_alpha <= 0.5);
         assert!(g.input_hold_ticks >= 20 && g.input_hold_ticks <= 200);
-        assert!(g.cortisol_strength >= 0.5 && g.cortisol_strength <= 1.5,
+        assert!(g.cortisol_strength >= 0.1 && g.cortisol_strength <= 1.0,
             "cortisol_strength {} out of range [0.5, 1.5]", g.cortisol_strength);
     }
 }
@@ -26,7 +26,7 @@ fn test_genome_mutate_stays_in_range() {
         assert!(g.weight_decay_interval >= 50 && g.weight_decay_interval <= 200);
         assert!(g.frustration_alpha >= 0.05 && g.frustration_alpha <= 0.5);
         assert!(g.input_hold_ticks >= 20 && g.input_hold_ticks <= 200);
-        assert!(g.cortisol_strength >= 0.5 && g.cortisol_strength <= 1.5);
+        assert!(g.cortisol_strength >= 0.1 && g.cortisol_strength <= 1.0);
     }
 }
 
@@ -35,7 +35,7 @@ fn test_genome_mutate_boosted_stays_in_range() {
     for _ in 0..100 {
         let mut g = Genome::random();
         g.mutate(2.0);
-        assert!(g.cortisol_strength >= 0.5 && g.cortisol_strength <= 1.5);
+        assert!(g.cortisol_strength >= 0.1 && g.cortisol_strength <= 1.0);
     }
 }
 
@@ -57,16 +57,16 @@ fn test_genome_mutate_changes_values() {
 fn test_genome_crossover_combines_parents() {
     let mut parent_a = Genome::random();
     let mut parent_b = Genome::random();
-    parent_a.cortisol_strength = 0.6;
-    parent_b.cortisol_strength = 1.4;
+    parent_a.cortisol_strength = 0.2;
+    parent_b.cortisol_strength = 0.8;
 
     let mut got_a = false;
     let mut got_b = false;
 
     for _ in 0..100 {
         let child = Genome::crossover(&parent_a, &parent_b);
-        if (child.cortisol_strength - 0.6).abs() < 0.001 { got_a = true; }
-        if (child.cortisol_strength - 1.4).abs() < 0.001 { got_b = true; }
+        if (child.cortisol_strength - 0.2).abs() < 0.001 { got_a = true; }
+        if (child.cortisol_strength - 0.8).abs() < 0.001 { got_b = true; }
     }
 
     assert!(got_a && got_b, "Crossover should use cortisol from both parents");
@@ -135,5 +135,5 @@ fn test_tune_tiny_run() {
     };
     let (best_genome, best_result) = spore_sim::tuner::tune(&config);
     assert!(best_result.score.is_finite());
-    assert!(best_genome.cortisol_strength >= 0.5 && best_genome.cortisol_strength <= 1.5);
+    assert!(best_genome.cortisol_strength >= 0.1 && best_genome.cortisol_strength <= 1.0);
 }
