@@ -63,6 +63,15 @@ pub const DEFAULT_CORTISOL_STRENGTH: f32 = 0.3;
 /// Every N ticks, weights *= 0.99.
 pub const DEFAULT_WEIGHT_DECAY_INTERVAL: u64 = 100;
 
+/// Target firing rate for activity homeostasis (10%).
+/// If a Spore fires less than this, bias_o is nudged up; more, nudged down.
+/// Prevents Dead Neuron problem: no Spore can stay silent forever.
+pub const DEFAULT_TARGET_RATE: f32 = 0.1;
+
+/// Rate at which homeostasis adjusts bias_o toward target firing rate.
+/// bias_o += homeostasis_rate * (target_rate - firing_rate) each tick.
+pub const DEFAULT_HOMEOSTASIS_RATE: f32 = 0.01;
+
 // =============================================================================
 // Environment / Trial Parameters
 // =============================================================================

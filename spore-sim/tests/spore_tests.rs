@@ -22,6 +22,7 @@ fn test_spore_initial_state() {
     assert_eq!(s.dopamine, 0.0);
     assert_eq!(s.recent_accuracy, 0.0);
     assert_eq!(s.ticks_alive, 0);
+    assert_eq!(s.firing_rate, 0.0);
     assert_eq!(s.output, false);
     assert_eq!(s.hidden, [false; HIDDEN_SIZE]);
 }
@@ -313,9 +314,11 @@ fn test_maintain_bias_not_decayed() {
     let mut s = Spore::default_params();
     s.bias_h[0] = 1.0;
     s.bias_o = 1.0;
+    // Set firing_rate = target_rate so homeostasis doesn't nudge bias_o
+    s.firing_rate = s.target_rate;
     s.maintain(DEFAULT_WEIGHT_DECAY_INTERVAL);
-    assert_eq!(s.bias_h[0], 1.0, "Bias should NOT be decayed");
-    assert_eq!(s.bias_o, 1.0, "Bias should NOT be decayed");
+    assert_eq!(s.bias_h[0], 1.0, "Hidden bias should NOT be decayed");
+    assert_eq!(s.bias_o, 1.0, "Output bias should NOT be decayed when at target rate");
 }
 
 #[test]
@@ -326,6 +329,76 @@ fn test_maintain_increments_ticks_alive() {
     assert_eq!(s.ticks_alive, 1);
     s.maintain(1);
     assert_eq!(s.ticks_alive, 2);
+}
+
+// =============================================================================
+// Activity Homeostasis
+// =============================================================================
+
+#[test]
+fn test_fire_updates_firing_rate_ema() {
+    let mut s = Spore::default_params();
+    s.base_noise = 0.0;
+    s.frustration = 0.0;
+    // Force output to fire
+    for j in 0..HIDDEN_SIZE {
+        s.weights_ih[j] = [10.0; INPUT_SIZE];
+        s.weights_ho[j] = 10.0;
+        s.bias_h[j] = 10.0;
+    }
+    s.bias_o = 10.0;
+
+    assert_eq!(s.firing_rate, 0.0);
+    s.fire(&[1.0; INPUT_SIZE]);
+    // rate = 0.99 * 0.0 + 0.01 * 1.0 = 0.01
+    assert!((s.firing_rate - 0.01).abs() < 0.001);
+}
+
+#[test]
+fn test_fire_firing_rate_stays_zero_when_silent() {
+    let mut s = Spore::default_params();
+    s.base_noise = 0.0;
+    s.frustration = 0.0;
+    // Force output to NOT fire
+    for j in 0..HIDDEN_SIZE {
+        s.bias_h[j] = -100.0;
+    }
+    s.bias_o = -100.0;
+
+    s.fire(&[0.0; INPUT_SIZE]);
+    // rate = 0.99 * 0.0 + 0.01 * 0.0 = 0.0
+    assert_eq!(s.firing_rate, 0.0);
+}
+
+#[test]
+fn test_homeostasis_increases_bias_when_silent() {
+    let mut s = Spore::default_params();
+    s.firing_rate = 0.0; // Dead neuron
+    let original_bias = s.bias_o;
+    s.maintain(1);
+    // diff = 0.1 - 0.0 = 0.1, bias_o += 0.01 * 0.1 = 0.001
+    assert!(s.bias_o > original_bias, "Homeostasis should increase bias_o for silent Spore");
+    assert!((s.bias_o - original_bias - 0.001).abs() < 0.0001);
+}
+
+#[test]
+fn test_homeostasis_decreases_bias_when_overactive() {
+    let mut s = Spore::default_params();
+    s.firing_rate = 0.5; // Firing 50% of the time (target is 10%)
+    let original_bias = s.bias_o;
+    s.maintain(1);
+    // diff = 0.1 - 0.5 = -0.4, bias_o += 0.01 * -0.4 = -0.004
+    assert!(s.bias_o < original_bias, "Homeostasis should decrease bias_o for overactive Spore");
+    assert!((s.bias_o - original_bias + 0.004).abs() < 0.0001);
+}
+
+#[test]
+fn test_homeostasis_no_change_at_target() {
+    let mut s = Spore::default_params();
+    s.firing_rate = DEFAULT_TARGET_RATE; // Exactly at target
+    let original_bias = s.bias_o;
+    s.maintain(1);
+    assert_eq!(s.bias_o, original_bias, "No adjustment needed at target rate");
 }
 
 // =============================================================================
@@ -342,6 +415,8 @@ fn test_reset_clears_state() {
     s.traces_ih[0][0] = 0.8;
     s.bias_h[0] = 5.0;
 
+    s.firing_rate = 0.8;
+
     s.reset();
 
     assert_eq!(s.ticks_alive, 0);
@@ -351,6 +426,7 @@ fn test_reset_clears_state() {
     assert_eq!(s.traces_ih[0][0], 0.0);
     assert_eq!(s.bias_h[0], INITIAL_BIAS);
     assert_eq!(s.bias_o, INITIAL_BIAS);
+    assert_eq!(s.firing_rate, 0.0);
     assert_eq!(s.output, false);
 }
 

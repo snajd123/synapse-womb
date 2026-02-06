@@ -78,6 +78,10 @@ pub struct Spore {
     /// Ticks this Spore has been alive (for rejuvenation grace period).
     pub ticks_alive: u64,
 
+    /// Output firing rate EMA for activity homeostasis.
+    /// Tracks how often this Spore's output neuron fires.
+    pub firing_rate: f32,
+
     // ========================================================================
     // HYPERPARAMETERS
     // ========================================================================
@@ -89,6 +93,8 @@ pub struct Spore {
     pub frustration_alpha: f32,
     pub weight_decay_interval: u64,
     pub cortisol_strength: f32,
+    pub target_rate: f32,
+    pub homeostasis_rate: f32,
 }
 
 impl Spore {
@@ -127,6 +133,7 @@ impl Spore {
             frustration: 1.0, // Start fully frustrated (explore)
             recent_accuracy: 0.0,
             ticks_alive: 0,
+            firing_rate: 0.0,
             learning_rate,
             trace_decay,
             base_noise,
@@ -134,6 +141,8 @@ impl Spore {
             frustration_alpha,
             weight_decay_interval,
             cortisol_strength,
+            target_rate: DEFAULT_TARGET_RATE,
+            homeostasis_rate: DEFAULT_HOMEOSTASIS_RATE,
         }
     }
 
@@ -203,6 +212,10 @@ impl Spore {
             self.trace_bias_o = 1.0;
         }
 
+        // Update firing rate EMA for activity homeostasis
+        let fired = if self.output { 1.0_f32 } else { 0.0 };
+        self.firing_rate = 0.99 * self.firing_rate + 0.01 * fired;
+
         self.output
     }
 
@@ -270,14 +283,19 @@ impl Spore {
         self.dopamine = 0.0;
     }
 
-    /// Maintenance: decay traces, apply weight decay.
+    /// Maintenance: decay traces, apply weight decay, activity homeostasis.
     ///
     /// - Traces decay by trace_decay each tick
     /// - Weights decay by *0.99 every weight_decay_interval ticks
     /// - Biases are NOT decayed (structural property)
+    /// - Activity homeostasis: nudge bias_o toward target firing rate
     /// - ticks_alive incremented for rejuvenation tracking
     pub fn maintain(&mut self, tick: u64) {
         self.ticks_alive += 1;
+
+        // Activity homeostasis: keep output neuron at target firing rate
+        let diff = self.target_rate - self.firing_rate;
+        self.bias_o += self.homeostasis_rate * diff;
 
         // Trace decay
         for row in &mut self.traces_ih {
@@ -333,5 +351,6 @@ impl Spore {
         self.frustration = 1.0;
         self.recent_accuracy = 0.0;
         self.ticks_alive = 0;
+        self.firing_rate = 0.0;
     }
 }
