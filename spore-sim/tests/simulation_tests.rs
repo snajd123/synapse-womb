@@ -1,5 +1,4 @@
 use spore_sim::simulation::Simulation;
-use spore_sim::constants::*;
 
 #[test]
 fn test_simulation_new() {
