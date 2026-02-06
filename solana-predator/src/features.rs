@@ -20,6 +20,36 @@ pub const FEATURE_NAMES: &[&str] = &[
 /// Number of features produced by compute_features().
 pub const NUM_FEATURES: usize = 22;
 
+/// Dual-pool feature names (single-pool features + cross-pool features).
+pub const DUAL_FEATURE_NAMES: &[&str] = &[
+    // [0-21] Raydium single-pool features (same as FEATURE_NAMES)
+    "ray_coin_b0", "ray_coin_b1", "ray_coin_b2", "ray_coin_b3",
+    "ray_coin_b4", "ray_coin_b5", "ray_coin_b6", "ray_coin_b7",
+    "ray_pc_b0", "ray_pc_b1", "ray_pc_b2", "ray_pc_b3",
+    "ray_pc_b4", "ray_pc_b5", "ray_pc_b6", "ray_pc_b7",
+    "ray_price",
+    "ray_coin_delta", "ray_pc_delta", "ray_price_delta",
+    "ray_volume", "ray_activity",
+    // [22-43] Orca single-pool features
+    "orca_coin_b0", "orca_coin_b1", "orca_coin_b2", "orca_coin_b3",
+    "orca_coin_b4", "orca_coin_b5", "orca_coin_b6", "orca_coin_b7",
+    "orca_pc_b0", "orca_pc_b1", "orca_pc_b2", "orca_pc_b3",
+    "orca_pc_b4", "orca_pc_b5", "orca_pc_b6", "orca_pc_b7",
+    "orca_price",
+    "orca_coin_delta", "orca_pc_delta", "orca_price_delta",
+    "orca_volume", "orca_activity",
+    // [44-49] Cross-pool features
+    "spread",        // |ray_price - orca_price|
+    "spread_delta",  // change in spread vs previous
+    "price_ratio",   // ray_price / orca_price encoded around 128
+    "ray_premium",   // ray > orca → >128, ray < orca → <128
+    "liq_imbalance", // relative liquidity difference
+    "spread_accel",  // spread_delta change (second derivative)
+];
+
+/// Number of features produced by compute_dual_features().
+pub const NUM_DUAL_FEATURES: usize = 50;
+
 /// Quantize signed delta to byte: 128 = zero, 0 = max negative, 255 = max positive.
 /// `scale` controls sensitivity: delta is divided by scale before clamping.
 fn delta_to_byte(delta: i64, scale: i64) -> u8 {
@@ -89,6 +119,88 @@ pub fn compute_features(
     }
 
     debug_assert_eq!(f.len(), NUM_FEATURES);
+    f
+}
+
+/// Quantize absolute spread (USD) to byte: 0 = zero, 255 = $1+ spread.
+/// Scale: $0.004 per unit → 255 covers ~$1.02.
+fn spread_to_byte(spread: f64) -> u8 {
+    (spread / 0.004).clamp(0.0, 255.0) as u8
+}
+
+/// Encode price ratio (ray/orca) as byte: 128 = equal, >128 = ray premium, <128 = orca premium.
+/// Scale: ±0.1% per unit → covers ±12.8% divergence.
+fn ratio_to_byte(ray_price: f64, orca_price: f64) -> u8 {
+    if orca_price <= 0.0 { return 128; }
+    let ratio = ray_price / orca_price;
+    let offset = (ratio - 1.0) * 1000.0; // 0.1% = 1 unit
+    (offset.clamp(-128.0, 127.0) + 128.0) as u8
+}
+
+/// Compute dual-pool features: single-pool features for both Raydium and Orca,
+/// plus 6 cross-pool arbitrage features. Returns exactly NUM_DUAL_FEATURES bytes.
+pub fn compute_dual_features(
+    ray: &Record,
+    ray_prev: Option<&Record>,
+    orca: &Record,
+    orca_prev: Option<&Record>,
+    coin_dec: u8,
+    pc_dec: u8,
+) -> Vec<u8> {
+    let mut f = Vec::with_capacity(NUM_DUAL_FEATURES);
+
+    // [0-21] Raydium single-pool features
+    f.extend_from_slice(&compute_features(ray, ray_prev, coin_dec, pc_dec));
+    // [22-43] Orca single-pool features
+    f.extend_from_slice(&compute_features(orca, orca_prev, coin_dec, pc_dec));
+
+    // Cross-pool features
+    let ray_price = ray.price(coin_dec, pc_dec);
+    let orca_price = orca.price(coin_dec, pc_dec);
+    let spread = (ray_price - orca_price).abs();
+
+    // [44] Spread: absolute price difference
+    f.push(spread_to_byte(spread));
+
+    // [45] Spread delta: change in spread vs previous
+    if let (Some(rp), Some(op)) = (ray_prev, orca_prev) {
+        let prev_spread = (rp.price(coin_dec, pc_dec) - op.price(coin_dec, pc_dec)).abs();
+        let spread_change = ((spread - prev_spread) * 10000.0) as i64;
+        f.push(delta_to_byte(spread_change, 1));
+    } else {
+        f.push(128);
+    }
+
+    // [46] Price ratio: ray/orca encoded around 128
+    f.push(ratio_to_byte(ray_price, orca_price));
+
+    // [47] Ray premium: directional (ray > orca → >128)
+    let premium = if orca_price > 0.0 {
+        ((ray_price - orca_price) / orca_price * 1000.0).clamp(-128.0, 127.0) + 128.0
+    } else {
+        128.0
+    };
+    f.push(premium as u8);
+
+    // [48] Liquidity imbalance: ratio of total vault values
+    let ray_liq = ray.coin_amount as f64 + ray.pc_amount as f64;
+    let orca_liq = orca.coin_amount as f64 + orca.pc_amount as f64;
+    let liq_ratio = if orca_liq > 0.0 { ray_liq / (ray_liq + orca_liq) } else { 0.5 };
+    f.push((liq_ratio * 255.0).clamp(0.0, 255.0) as u8);
+
+    // [49] Spread acceleration (second derivative)
+    // Requires two previous records; without them, neutral
+    if let (Some(rp), Some(op)) = (ray_prev, orca_prev) {
+        let prev_spread = (rp.price(coin_dec, pc_dec) - op.price(coin_dec, pc_dec)).abs();
+        let spread_delta = spread - prev_spread;
+        // We don't have prev-prev, so use spread_delta sign as proxy
+        let accel = (spread_delta * 100000.0) as i64;
+        f.push(delta_to_byte(accel, 1));
+    } else {
+        f.push(128);
+    }
+
+    debug_assert_eq!(f.len(), NUM_DUAL_FEATURES);
     f
 }
 
@@ -226,5 +338,107 @@ mod tests {
         let r = make_record(100, 200);
         let f = compute_features(&r, None, 9, 6);
         assert_eq!(f[21], 0);
+    }
+
+    // --- spread_to_byte tests ---
+
+    #[test]
+    fn test_spread_zero() {
+        assert_eq!(spread_to_byte(0.0), 0);
+    }
+
+    #[test]
+    fn test_spread_small() {
+        // $0.01 spread → 0.01 / 0.004 = 2.5 → 2
+        let b = spread_to_byte(0.01);
+        assert!(b > 0 && b < 50, "small spread should be low, got {}", b);
+    }
+
+    #[test]
+    fn test_spread_large() {
+        // $1.00 spread → 1.0 / 0.004 = 250 → 250
+        let b = spread_to_byte(1.0);
+        assert!(b >= 250, "$1 spread should be near 255, got {}", b);
+    }
+
+    #[test]
+    fn test_spread_saturates() {
+        assert_eq!(spread_to_byte(10.0), 255);
+    }
+
+    // --- ratio_to_byte tests ---
+
+    #[test]
+    fn test_ratio_equal() {
+        assert_eq!(ratio_to_byte(100.0, 100.0), 128); // 1.0 → midpoint
+    }
+
+    #[test]
+    fn test_ratio_ray_higher() {
+        let b = ratio_to_byte(105.0, 100.0);
+        assert!(b > 128, "ray higher should be >128, got {}", b);
+    }
+
+    #[test]
+    fn test_ratio_orca_higher() {
+        let b = ratio_to_byte(95.0, 100.0);
+        assert!(b < 128, "orca higher should be <128, got {}", b);
+    }
+
+    #[test]
+    fn test_ratio_zero_orca() {
+        assert_eq!(ratio_to_byte(100.0, 0.0), 128); // fallback
+    }
+
+    // --- compute_dual_features tests ---
+
+    #[test]
+    fn test_dual_feature_count() {
+        let r1 = make_record(100, 200);
+        let r2 = make_record(300, 400);
+        let f = compute_dual_features(&r1, None, &r2, None, 9, 6);
+        assert_eq!(f.len(), NUM_DUAL_FEATURES);
+    }
+
+    #[test]
+    fn test_dual_features_include_single_pool() {
+        let ray = make_record(1_000_000_000, 87_000_000);
+        let orca = make_record(500_000_000, 43_500_000);
+        let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
+        let ray_only = compute_features(&ray, None, 9, 6);
+        // First NUM_FEATURES bytes of dual should equal ray-only features
+        assert_eq!(&dual[..NUM_FEATURES], &ray_only[..]);
+    }
+
+    #[test]
+    fn test_dual_features_orca_section() {
+        let ray = make_record(1_000_000_000, 87_000_000);
+        let orca = make_record(500_000_000, 43_500_000);
+        let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
+        let orca_only = compute_features(&orca, None, 9, 6);
+        // Bytes [22..44] should equal orca-only features
+        assert_eq!(&dual[NUM_FEATURES..NUM_FEATURES * 2], &orca_only[..]);
+    }
+
+    #[test]
+    fn test_dual_spread_zero_same_price() {
+        // Same vault ratios → same price → spread = 0
+        let ray = make_record(1_000_000_000, 87_000_000);
+        let orca = make_record(1_000_000_000, 87_000_000);
+        let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
+        assert_eq!(dual[44], 0); // spread = 0
+    }
+
+    #[test]
+    fn test_dual_ratio_same_price() {
+        let ray = make_record(1_000_000_000, 87_000_000);
+        let orca = make_record(1_000_000_000, 87_000_000);
+        let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
+        assert_eq!(dual[46], 128); // ratio = 1.0 → midpoint
+    }
+
+    #[test]
+    fn test_dual_feature_names_count() {
+        assert_eq!(DUAL_FEATURE_NAMES.len(), NUM_DUAL_FEATURES);
     }
 }
