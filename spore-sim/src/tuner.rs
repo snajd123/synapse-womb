@@ -1,7 +1,7 @@
-//! Genetic hyperparameter tuner for the Spore neural network.
+//! Genetic hyperparameter tuner for the Swarm V2 neural network.
 //!
 //! Evolves optimal hyperparameters using a genetic algorithm:
-//! - Population of 50 Genomes
+//! - Population of 50 Genomes (7 genes including cortisol_strength)
 //! - 20 generations of evolution
 //! - Crossover + mutation + diversity injection
 //! - Parallel evaluation with rayon
@@ -12,8 +12,9 @@ use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 
 use crate::simulation::Simulation;
+use crate::constants::*;
 
-/// A genome encoding 6 tunable hyperparameters for the Spore network.
+/// A genome encoding 7 tunable hyperparameters for the Swarm.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Genome {
     /// Learning rate for Hebbian weight updates. Range: 0.05 - 0.5
@@ -34,6 +35,10 @@ pub struct Genome {
 
     /// Ticks to hold each input pattern. Range: 20 - 200
     pub input_hold_ticks: u64,
+
+    /// Cortisol strength (anti-Hebbian punishment ratio). Range: 0.1 - 1.0
+    /// Default 0.5 (moderate positive drift for bootstrapping).
+    pub cortisol_strength: f32,
 }
 
 impl Genome {
@@ -47,6 +52,7 @@ impl Genome {
             weight_decay_interval: rng.gen_range(50..=200),
             frustration_alpha: rng.gen_range(0.05..=0.5),
             input_hold_ticks: rng.gen_range(20..=200),
+            cortisol_strength: rng.gen_range(0.1..=1.0),
         }
     }
 
@@ -54,7 +60,6 @@ impl Genome {
     ///
     /// Each gene has a 10% independent chance of mutation.
     /// `magnitude_mult` scales the STEP SIZE (not probability).
-    /// Use magnitude_mult=2.0 to escape local minima.
     pub fn mutate(&mut self, magnitude_mult: f32) {
         let mut rng = rand::thread_rng();
 
@@ -63,7 +68,6 @@ impl Genome {
             self.learning_rate = self.learning_rate.clamp(0.05, 0.5);
         }
         if rng.gen::<f32>() < 0.1 {
-            // Fine-grained: trace_decay is exponentially sensitive
             self.trace_decay += rng.gen_range(-0.005..=0.005) * magnitude_mult;
             self.trace_decay = self.trace_decay.clamp(0.85, 0.999);
         }
@@ -85,12 +89,13 @@ impl Genome {
             self.input_hold_ticks = (self.input_hold_ticks as i64 + delta)
                 .clamp(20, 200) as u64;
         }
+        if rng.gen::<f32>() < 0.1 {
+            self.cortisol_strength += rng.gen_range(-0.05..=0.05) * magnitude_mult;
+            self.cortisol_strength = self.cortisol_strength.clamp(0.1, 1.0);
+        }
     }
 
     /// Sexual reproduction: combine genes from two parents.
-    ///
-    /// Each gene is independently selected from parent_a or parent_b
-    /// with equal probability (uniform crossover).
     pub fn crossover(parent_a: &Genome, parent_b: &Genome) -> Genome {
         let mut rng = rand::thread_rng();
         Genome {
@@ -100,6 +105,7 @@ impl Genome {
             weight_decay_interval: if rng.gen() { parent_a.weight_decay_interval } else { parent_b.weight_decay_interval },
             frustration_alpha: if rng.gen() { parent_a.frustration_alpha } else { parent_b.frustration_alpha },
             input_hold_ticks: if rng.gen() { parent_a.input_hold_ticks } else { parent_b.input_hold_ticks },
+            cortisol_strength: if rng.gen() { parent_a.cortisol_strength } else { parent_b.cortisol_strength },
         }
     }
 }
@@ -107,34 +113,18 @@ impl Genome {
 /// Result of evaluating a single Genome.
 #[derive(Clone, Debug)]
 pub struct EvalResult {
-    /// Fitness score (higher = better)
     pub score: f32,
-
-    /// Mean accuracy since convergence (or final accuracy if never converged)
     pub final_accuracy: f32,
-
-    /// Tick at which stable convergence was achieved (None = never)
     pub convergence_tick: Option<u64>,
-
-    /// Whether the genome achieved stable convergence
     pub stable: bool,
 }
 
 /// Configuration for the genetic tuner.
 pub struct TunerConfig {
-    /// Number of genomes per generation
     pub population_size: usize,
-
-    /// Number of evolution generations
     pub generations: usize,
-
-    /// Number of elite genomes to preserve (cached, not re-evaluated)
     pub elite_count: usize,
-
-    /// Simulation ticks per evaluation
     pub ticks_per_eval: u64,
-
-    /// Number of finalists for the Final Exam
     pub finalist_count: usize,
 }
 
@@ -153,49 +143,30 @@ impl Default for TunerConfig {
 /// Run the genetic hyperparameter tuner.
 ///
 /// Returns the best genome and its evaluation result.
-///
-/// Algorithm:
-/// 1. Generate random initial population
-/// 2. For each generation:
-///    a. Evaluate all new genomes in parallel (rayon)
-///    b. Merge with cached elite scores
-///    c. Select top N as new elites
-///    d. Breed next generation: crossover + mutation + diversity injection
-/// 3. Final Exam: top candidates run full marathon (no early exit)
 pub fn tune(config: &TunerConfig) -> (Genome, EvalResult) {
     let mut rng = rand::thread_rng();
 
-    // Initial population: all random
     let mut population: Vec<Genome> = (0..config.population_size)
         .map(|_| Genome::random())
         .collect();
 
-    // Elite cache: (genome, score) - NOT re-evaluated each generation
     let mut elite_cache: Vec<(Genome, EvalResult)> = Vec::new();
-
     let mut best_score: f32 = f32::NEG_INFINITY;
     let mut gens_without_improvement: usize = 0;
 
     for gen in 0..config.generations {
-        // PARALLEL: Evaluate all new genomes
         let new_scored: Vec<(Genome, EvalResult)> = population
             .par_iter()
             .map(|g| (g.clone(), evaluate_fast(g, config.ticks_per_eval)))
             .collect();
 
-        // Merge with cached elites
         let mut all_scored: Vec<(Genome, EvalResult)> = elite_cache.clone();
         all_scored.extend(new_scored);
-
-        // Safe sort (handles NaN)
         all_scored.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
-
-        // Truncate to reasonable size
         all_scored.truncate(config.population_size + config.elite_count);
 
         let gen_best = all_scored[0].1.score;
 
-        // Adaptive mutation tracking
         if gen_best > best_score {
             best_score = gen_best;
             gens_without_improvement = 0;
@@ -204,7 +175,6 @@ pub fn tune(config: &TunerConfig) -> (Genome, EvalResult) {
         }
         let magnitude_mult = if gens_without_improvement >= 3 { 2.0 } else { 1.0 };
 
-        // Progress report (after collect, not during parallel work)
         let stable_count = all_scored.iter().filter(|s| s.1.stable).count();
         let eval_count = all_scored.len().min(config.population_size);
         let avg_score: f32 = all_scored.iter().take(eval_count)
@@ -213,17 +183,14 @@ pub fn tune(config: &TunerConfig) -> (Genome, EvalResult) {
             gen, gen_best, avg_score, stable_count, eval_count,
             if magnitude_mult > 1.0 { " [BOOST]" } else { "" });
 
-        // Update elite cache (top N with their known scores)
         elite_cache = all_scored[0..config.elite_count.min(all_scored.len())].to_vec();
 
-        // BREED next generation: only new children (elites cached separately)
         let elites: Vec<&Genome> = elite_cache.iter().map(|(g, _)| g).collect();
-        let diversity_count = config.population_size / 5;  // 20% fresh randoms
+        let diversity_count = config.population_size / 5;
         let children_count = config.population_size - diversity_count;
 
         population = Vec::with_capacity(config.population_size);
 
-        // Children from crossover + mutation
         for _ in 0..children_count {
             let parent_a = &elites[rng.gen_range(0..elites.len())];
             let parent_b = &elites[rng.gen_range(0..elites.len())];
@@ -232,13 +199,12 @@ pub fn tune(config: &TunerConfig) -> (Genome, EvalResult) {
             population.push(child);
         }
 
-        // Diversity injection: fresh randoms
         for _ in 0..diversity_count {
             population.push(Genome::random());
         }
     }
 
-    // FINAL EXAM: Top candidates run full marathon (no early exit)
+    // FINAL EXAM
     let finalist_count = config.finalist_count.min(elite_cache.len());
     eprintln!("\n=== FINAL EXAM (Top {}, Full Marathon, 3 Runs) ===", finalist_count);
 
@@ -252,12 +218,11 @@ pub fn tune(config: &TunerConfig) -> (Genome, EvalResult) {
         .map(|g| (g.clone(), evaluate_full(g, config.ticks_per_eval)))
         .collect();
 
-    // Print results AFTER parallel work (no race condition)
     for (i, (genome, result)) in finalists.iter().enumerate() {
-        eprintln!("  #{:2}: score={:.1} acc={:.2}% stable={} conv@{:?} lr={:.3} td={:.4}",
+        eprintln!("  #{:2}: score={:.1} acc={:.2}% stable={} conv@{:?} lr={:.3} td={:.4} cs={:.2}",
             i + 1, result.score, result.final_accuracy * 100.0,
             result.stable, result.convergence_tick,
-            genome.learning_rate, genome.trace_decay);
+            genome.learning_rate, genome.trace_decay, genome.cortisol_strength);
     }
 
     finalists
@@ -266,10 +231,7 @@ pub fn tune(config: &TunerConfig) -> (Genome, EvalResult) {
         .unwrap()
 }
 
-/// Fast evaluation for use during evolution loop.
-///
-/// Runs the genome 3 times (different random sequences) and returns the WORST result.
-/// Includes early exit: if stable for 2000+ ticks at 98%+, stop.
+/// Fast evaluation: 3 runs, worst score, with early exit.
 pub fn evaluate_fast(genome: &Genome, ticks: u64) -> EvalResult {
     let results: Vec<EvalResult> = (0..3)
         .map(|_| evaluate_single(genome, ticks, true))
@@ -280,10 +242,7 @@ pub fn evaluate_fast(genome: &Genome, ticks: u64) -> EvalResult {
         .unwrap()
 }
 
-/// Full marathon evaluation for Final Exam.
-///
-/// Runs the genome 3 times with NO early exit. Must survive all ticks.
-/// Returns the WORST result (robustness check).
+/// Full marathon evaluation: 3 runs, worst score, NO early exit.
 pub fn evaluate_full(genome: &Genome, ticks: u64) -> EvalResult {
     let results: Vec<EvalResult> = (0..3)
         .map(|_| evaluate_single(genome, ticks, false))
@@ -296,27 +255,18 @@ pub fn evaluate_full(genome: &Genome, ticks: u64) -> EvalResult {
 
 /// Evaluate a single genome for a given number of ticks.
 ///
-/// IMPORTANT: Uses INSTANTANEOUS per-tick accuracy from sim.step() return value,
-/// NOT the EMA (sim.recent_accuracy). The EMA lags by ~30-45 ticks and would make
-/// convergence revocation sluggish. Per-tick accuracy gives honest, real-time signal.
-///
-/// Stability detection (Option B):
-/// - Track when accuracy first crosses 90%
-/// - If accuracy stays >= 85% for 1000 consecutive ticks -> stable convergence
-/// - Dip below 85% -> reset timer AND revoke convergence
-///
-/// Score:
-/// - Stable: mean_accuracy_since_converge * 2000 - (convergence_tick / 100)
-/// - Unstable: recent_accuracy * 500
+/// Uses per-tick accuracy from sim.step() for stability detection.
+/// Stability: 1000 consecutive ticks >= 90%, revoked if < 85%.
 fn evaluate_single(genome: &Genome, ticks: u64, allow_early_exit: bool) -> EvalResult {
     let mut sim = Simulation::with_full_params(
-        0,  // reward_latency (fixed for tuner)
-        genome.trace_decay,
+        DEFAULT_SWARM_SIZE,  // n_outputs (mirror task)
         genome.input_hold_ticks,
         genome.learning_rate,
+        genome.trace_decay,
         genome.max_noise_boost,
         genome.weight_decay_interval,
         genome.frustration_alpha,
+        genome.cortisol_strength,
     );
 
     let mut stability_window_start: Option<u64> = None;
@@ -326,14 +276,11 @@ fn evaluate_single(genome: &Genome, ticks: u64, allow_early_exit: bool) -> EvalR
     let mut last_accuracy: f32 = 0.0;
 
     for tick in 0..ticks {
-        // step() returns Some(accuracy) when reward delivered, None otherwise
-        // With reward_latency=0, this is always Some
         let tick_accuracy = sim.step();
 
-        // Use per-tick accuracy for stability detection (NOT the EMA)
         let acc = match tick_accuracy {
             Some(a) => { last_accuracy = a; a }
-            None => last_accuracy,  // Hold last known accuracy between rewards
+            None => last_accuracy,
         };
 
         // Stability detection
@@ -346,18 +293,15 @@ fn evaluate_single(genome: &Genome, ticks: u64, allow_early_exit: bool) -> EvalR
             }
         } else if acc < 0.85 {
             stability_window_start = None;
-            convergence_tick = None;  // REVOKE on crash
+            convergence_tick = None;
             accuracy_sum_since_converge = 0.0;
             ticks_since_converge = 0;
         }
-        // 0.85 <= acc < 0.90: timer continues, no action
 
-        // Track integral accuracy after convergence
         if convergence_tick.is_some() {
             accuracy_sum_since_converge += acc;
             ticks_since_converge += 1;
 
-            // Early exit (fast eval only): stable for 2000+ ticks at 98%+
             if allow_early_exit && ticks_since_converge >= 2000 {
                 let mean_acc = accuracy_sum_since_converge / ticks_since_converge as f32;
                 if mean_acc >= 0.98 {
@@ -372,12 +316,11 @@ fn evaluate_single(genome: &Genome, ticks: u64, allow_early_exit: bool) -> EvalR
         }
     }
 
-    // End of run scoring
     let stable = convergence_tick.is_some() && ticks_since_converge > 0;
     let mean_acc = if ticks_since_converge > 0 {
         accuracy_sum_since_converge / ticks_since_converge as f32
     } else {
-        sim.recent_accuracy  // Fall back to EMA only for unstable genomes
+        sim.recent_accuracy
     };
 
     let score = if stable {

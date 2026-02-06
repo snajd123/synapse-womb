@@ -1,7 +1,7 @@
-//! Spore Mirror Experiment - Phase 1
+//! Spore SWARM V2 — Mirror Experiment
 //!
-//! Proves that Hebbian learning + Dopamine reinforcement can evolve
-//! a byte-copy reflex from random noise.
+//! Proves that a colony of 8→4→1 Spores with per-bit credit assignment
+//! can learn the byte-copy reflex from random noise.
 //!
 //! Usage:
 //!   spore-sim [OPTIONS]
@@ -11,24 +11,24 @@
 //!   --tune            Run genetic hyperparameter tuner
 //!
 //! Simulation Options:
-//!   --ticks N         Number of ticks to run (default: 100000)
-//!   --latency N       Reward latency in ticks (default: 0)
-//!   --trace-decay F   Trace decay rate (default: 0.9)
-//!   --hold N          Input hold ticks (default: 50)
-//!   --learning-rate F Learning rate (default: 0.5)
-//!   --noise-boost F   Max noise boost (default: 0.05)
-//!   --decay-interval N Weight decay interval (default: 100)
+//!   --ticks N             Number of ticks to run (default: 100000)
+//!   --swarm-size N        Number of Spores / output bits (default: 8)
+//!   --trace-decay F       Trace decay rate (default: 0.9)
+//!   --hold N              Input hold ticks (default: 50)
+//!   --learning-rate F     Learning rate (default: 0.1)
+//!   --noise-boost F       Max noise boost (default: 0.05)
+//!   --decay-interval N    Weight decay interval (default: 100)
 //!   --frustration-alpha F Frustration EMA alpha (default: 0.2)
-//!   --log-interval N  Log every N ticks (default: 1000)
-//!   --quiet           Suppress logging
-//!   --dump-weights    Show ASCII weight visualization at end
-//!   --params FILE     Load parameters from JSON file
+//!   --cortisol F          Cortisol strength (default: 0.3)
+//!   --log-interval N      Log every N ticks (default: 1000)
+//!   --quiet               Suppress logging
+//!   --params FILE         Load parameters from JSON file
 //!
 //! Tuner Options:
-//!   --tune            Run genetic hyperparameter tuner
-//!   --population N    Tuner population size (default: 50)
-//!   --generations N   Tuner generations (default: 20)
-//!   --output FILE     Output JSON file (default: best_params.json)
+//!   --tune                Run genetic hyperparameter tuner
+//!   --population N        Tuner population size (default: 50)
+//!   --generations N       Tuner generations (default: 20)
+//!   --output FILE         Output JSON file (default: best_params.json)
 
 use spore_sim::simulation::Simulation;
 use spore_sim::tuner::{self, Genome, TunerConfig};
@@ -39,29 +39,26 @@ use std::fs;
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    // Check for --tune mode
     if args.iter().any(|a| a == "--tune") {
         run_tuner(&args);
         return;
     }
 
-    // Normal simulation mode
     run_simulation(&args);
 }
 
 fn run_simulation(args: &[String]) {
-    // Defaults
     let mut max_ticks: u64 = 100_000;
-    let mut reward_latency: u64 = DEFAULT_REWARD_LATENCY as u64;
-    let mut trace_decay: f32 = DEFAULT_TRACE_DECAY as f32;
-    let mut input_hold_ticks: u64 = DEFAULT_INPUT_HOLD_TICKS as u64;
-    let mut learning_rate: f32 = DEFAULT_LEARNING_RATE as f32;
-    let mut max_noise_boost: f32 = DEFAULT_MAX_NOISE_BOOST as f32;
-    let mut weight_decay_interval: u64 = WEIGHT_DECAY_INTERVAL as u64;
-    let mut frustration_alpha: f32 = 0.2;
+    let mut swarm_size: usize = DEFAULT_SWARM_SIZE;
+    let mut trace_decay: f32 = DEFAULT_TRACE_DECAY;
+    let mut input_hold_ticks: u64 = DEFAULT_INPUT_HOLD_TICKS;
+    let mut learning_rate: f32 = DEFAULT_LEARNING_RATE;
+    let mut max_noise_boost: f32 = DEFAULT_MAX_NOISE_BOOST;
+    let mut weight_decay_interval: u64 = DEFAULT_WEIGHT_DECAY_INTERVAL;
+    let mut frustration_alpha: f32 = DEFAULT_FRUSTRATION_ALPHA;
+    let mut cortisol_strength: f32 = DEFAULT_CORTISOL_STRENGTH;
     let mut log_interval: u64 = 1000;
     let mut quiet = false;
-    let mut dump_weights = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -70,9 +67,9 @@ fn run_simulation(args: &[String]) {
                 i += 1;
                 max_ticks = args[i].parse().expect("Invalid --ticks value");
             }
-            "--latency" => {
+            "--swarm-size" => {
                 i += 1;
-                reward_latency = args[i].parse().expect("Invalid --latency value");
+                swarm_size = args[i].parse().expect("Invalid --swarm-size value");
             }
             "--trace-decay" => {
                 i += 1;
@@ -98,6 +95,10 @@ fn run_simulation(args: &[String]) {
                 i += 1;
                 frustration_alpha = args[i].parse().expect("Invalid --frustration-alpha value");
             }
+            "--cortisol" => {
+                i += 1;
+                cortisol_strength = args[i].parse().expect("Invalid --cortisol value");
+            }
             "--log-interval" => {
                 i += 1;
                 log_interval = args[i].parse().expect("Invalid --log-interval value");
@@ -105,22 +106,19 @@ fn run_simulation(args: &[String]) {
             "--quiet" => {
                 quiet = true;
             }
-            "--dump-weights" => {
-                dump_weights = true;
-            }
             "--params" => {
                 i += 1;
                 let json = fs::read_to_string(&args[i])
                     .unwrap_or_else(|e| panic!("Failed to read {}: {}", args[i], e));
                 let genome: Genome = serde_json::from_str(&json)
                     .unwrap_or_else(|e| panic!("Failed to parse {}: {}", args[i], e));
-                // Override with loaded values
                 learning_rate = genome.learning_rate;
                 trace_decay = genome.trace_decay;
                 max_noise_boost = genome.max_noise_boost;
                 weight_decay_interval = genome.weight_decay_interval;
                 frustration_alpha = genome.frustration_alpha;
                 input_hold_ticks = genome.input_hold_ticks;
+                cortisol_strength = genome.cortisol_strength;
             }
             "--help" | "-h" => {
                 print_help();
@@ -137,82 +135,68 @@ fn run_simulation(args: &[String]) {
 
     if !quiet {
         println!("========================================");
-        println!("  SPORE MIRROR EXPERIMENT - PHASE 1    ");
+        println!("  SWARM V2 — MIRROR EXPERIMENT         ");
         println!("========================================");
-        println!(" Proving: Hebbian + Dopamine = Emergent Byte Copy");
+        println!(" {} Spores x (8->4->1) | {} per bit | Consensus", swarm_size, swarm_size / 8);
         println!();
         println!("Configuration:");
+        println!("  Swarm size:          {}", swarm_size);
         println!("  Max ticks:           {}", max_ticks);
-        println!("  Reward latency:      {}", reward_latency);
         println!("  Learning rate:       {}", learning_rate);
         println!("  Trace decay:         {}", trace_decay);
         println!("  Max noise boost:     {}", max_noise_boost);
         println!("  Weight decay intv:   {}", weight_decay_interval);
         println!("  Frustration alpha:   {}", frustration_alpha);
+        println!("  Cortisol strength:   {}", cortisol_strength);
         println!("  Input hold ticks:    {}", input_hold_ticks);
         println!();
-
-        // Validate timing constraint (Fix 4)
-        let min_hold = min_input_hold_ticks(reward_latency as usize);
-        if (input_hold_ticks as usize) < min_hold {
-            println!("WARNING: input_hold_ticks ({}) < minimum ({}) for latency {}",
-                input_hold_ticks, min_hold, reward_latency);
-            println!("   This may cause superstitious learning (Fix 4).");
-            println!();
-        }
-
-        // Recommend trace decay
-        let rec_decay = recommended_trace_decay(reward_latency as usize);
-        if (trace_decay as f64) < rec_decay - 0.02 {
-            println!("WARNING: trace_decay ({}) may be too fast for latency {}",
-                trace_decay, reward_latency);
-            println!("   Recommended: >= {:.2}", rec_decay);
-            println!();
-        }
     }
 
-    // Create and run simulation
     let mut sim = Simulation::with_full_params(
-        reward_latency,
-        trace_decay,
+        swarm_size,
         input_hold_ticks,
         learning_rate,
+        trace_decay,
         max_noise_boost,
         weight_decay_interval,
         frustration_alpha,
+        cortisol_strength,
     );
 
     let actual_log_interval = if quiet { 0 } else { log_interval };
     let final_accuracy = sim.run(max_ticks, actual_log_interval);
 
-    // Dump weights if requested
-    if dump_weights {
-        println!();
-        println!("WEIGHT VISUALIZATION:");
-        sim.spore().dump_weights_ascii();
-    }
-
-    // Report results
     println!();
     println!("========================================");
     println!("FINAL RESULTS");
     println!("========================================");
-    println!("  Ticks run:      {}", sim.tick);
-    println!("  Final accuracy: {:.2}%", final_accuracy * 100.0);
-    println!("  Frustration:    {:.3}", sim.spore().frustration);
+    println!("  Ticks run:         {}", sim.tick);
+    println!("  Consensus accuracy: {:.2}%", sim.swarm().accuracy() * 100.0);
+    println!("  Per-Bit Consensus (best Spore per bit):");
+    for k in 0..8 {
+        let mut assigned: Vec<(usize, f32)> = sim.swarm().spores.iter()
+            .enumerate()
+            .filter(|(i, _)| i % 8 == k)
+            .map(|(i, s)| (i, s.recent_accuracy))
+            .collect();
+        assigned.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let best = assigned[0];
+        let others: Vec<String> = assigned[1..].iter()
+            .map(|(i, a)| format!("S{}={:.0}%", i, a * 100.0))
+            .collect();
+        println!("    Bit {}: best=Spore {} ({:.1}%)  peers=[{}]",
+            k, best.0, best.1 * 100.0, others.join(", "));
+    }
     println!();
 
     if sim.has_converged(0.95) {
-        println!("SUCCESS: Spore learned to mirror! (accuracy > 95%)");
+        println!("SUCCESS: Swarm learned to mirror! (accuracy > 95%)");
     } else if final_accuracy > 0.8 {
-        println!("PARTIAL: Spore is learning but hasn't converged (accuracy > 80%)");
-        println!("   Try running for more ticks or tuning hyperparameters.");
+        println!("PARTIAL: Swarm is learning but hasn't converged (accuracy > 80%)");
     } else if final_accuracy > 0.5 {
-        println!("SLOW: Spore is above baseline but learning slowly");
-        println!("   Check: learning_rate, trace_decay, input_hold_ticks");
+        println!("SLOW: Swarm is above baseline but learning slowly");
     } else {
-        println!("FAILED: Spore did not converge (accuracy <= 50%)");
-        println!("   Check failure modes in docs/plans/");
+        println!("FAILED: Swarm did not converge (accuracy <= 50%)");
     }
 }
 
@@ -223,7 +207,7 @@ fn run_tuner(args: &[String]) {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--tune" => {}  // Already handled
+            "--tune" => {}
             "--population" => {
                 i += 1;
                 config.population_size = args[i].parse().expect("Invalid --population");
@@ -240,13 +224,13 @@ fn run_tuner(args: &[String]) {
                 i += 1;
                 output_file = args[i].clone();
             }
-            _ => {}  // Ignore unknown args in tune mode
+            _ => {}
         }
         i += 1;
     }
 
     println!("========================================");
-    println!("  SPORE GENETIC HYPERPARAMETER TUNER   ");
+    println!("  SWARM V2 GENETIC TUNER               ");
     println!("========================================");
     println!();
     println!("Configuration:");
@@ -280,9 +264,9 @@ fn run_tuner(args: &[String]) {
     println!("  weight_decay_interval: {}", best_genome.weight_decay_interval);
     println!("  frustration_alpha:     {:.4}", best_genome.frustration_alpha);
     println!("  input_hold_ticks:      {}", best_genome.input_hold_ticks);
+    println!("  cortisol_strength:     {:.4}", best_genome.cortisol_strength);
     println!();
 
-    // Save to JSON
     let json = serde_json::to_string_pretty(&best_genome)
         .expect("Failed to serialize genome");
     fs::write(&output_file, &json)
@@ -295,7 +279,7 @@ fn run_tuner(args: &[String]) {
 }
 
 fn print_help() {
-    println!("Spore Mirror Experiment - Phase 1");
+    println!("SWARM V2 — Mirror Experiment");
     println!();
     println!("USAGE:");
     println!("  spore-sim [OPTIONS]");
@@ -303,16 +287,16 @@ fn print_help() {
     println!();
     println!("SIMULATION OPTIONS:");
     println!("  --ticks N             Number of ticks to run (default: 100000)");
-    println!("  --latency N           Reward latency in ticks (default: 0)");
+    println!("  --swarm-size N        Number of Spores (default: 8)");
     println!("  --trace-decay F       Trace decay rate (default: 0.9)");
     println!("  --hold N              Input hold ticks (default: 50)");
-    println!("  --learning-rate F     Learning rate (default: 0.5)");
+    println!("  --learning-rate F     Learning rate (default: 0.1)");
     println!("  --noise-boost F       Max noise boost (default: 0.05)");
     println!("  --decay-interval N    Weight decay interval (default: 100)");
     println!("  --frustration-alpha F Frustration EMA alpha (default: 0.2)");
+    println!("  --cortisol F          Cortisol strength (default: 0.3)");
     println!("  --log-interval N      Log every N ticks (default: 1000)");
     println!("  --quiet               Suppress logging");
-    println!("  --dump-weights        Show ASCII weight visualization at end");
     println!("  --params FILE         Load parameters from JSON file");
     println!("  --help, -h            Show this help");
     println!();

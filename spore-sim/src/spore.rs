@@ -1,516 +1,387 @@
-//! The Spore: A neural substrate that learns through Hebbian reinforcement.
+//! The Spore: Smallest unit of Narrow Intent.
 //!
-//! An 8-32-8 network topology with:
-//! - Hard threshold activation with noise injection
+//! A tiny 8-4-1 neural network that learns to produce one output bit.
+//! - Hard threshold activation (f32 weights, binary decisions)
+//! - Tunable bias per neuron
+//! - Signed dopamine: +1.0 (correct) or -cortisol_strength (wrong)
+//! - Per-Spore frustration with Fix 2 instant spike
 //! - Eligibility traces for temporal credit assignment
-//! - Signed dopamine for reward/punishment
-//! - Homeostasis to prevent runaway
 
+use rand::Rng;
 use crate::constants::*;
 use crate::utils::random_weight;
 
-/// The Spore neural network.
-///
-/// A pipelined 8-32-8 network that learns to copy input to output
-/// using only Hebbian learning and dopamine reinforcement.
+/// A single Spore: an 8→4→1 network responsible for one output bit.
 #[derive(Debug, Clone)]
 pub struct Spore {
     // ========================================================================
-    // WEIGHTS (learnable)
+    // WEIGHTS (f32, learnable)
     // ========================================================================
 
-    /// Input → Hidden weights. Shape: [HIDDEN_SIZE][INPUT_SIZE] = [32][8]
-    pub weights_ih: [[i16; INPUT_SIZE]; HIDDEN_SIZE],
+    /// Input → Hidden weights. Shape: [HIDDEN_SIZE][INPUT_SIZE] = [4][8]
+    pub weights_ih: [[f32; INPUT_SIZE]; HIDDEN_SIZE],
 
-    /// Hidden → Output weights. Shape: [OUTPUT_SIZE][HIDDEN_SIZE] = [8][32]
-    pub weights_ho: [[i16; HIDDEN_SIZE]; OUTPUT_SIZE],
+    /// Hidden → Output weights. Shape: [HIDDEN_SIZE] = [4]
+    pub weights_ho: [f32; HIDDEN_SIZE],
 
     // ========================================================================
-    // THRESHOLDS (learnable)
+    // BIASES (f32, learnable, per-neuron excitability)
     // ========================================================================
 
-    /// Per-neuron firing thresholds for hidden layer
-    pub thresholds_h: [i16; HIDDEN_SIZE],
+    /// Hidden layer biases. Shape: [HIDDEN_SIZE] = [4]
+    pub bias_h: [f32; HIDDEN_SIZE],
 
-    /// Per-neuron firing thresholds for output layer
-    pub thresholds_o: [i16; OUTPUT_SIZE],
+    /// Output neuron bias.
+    pub bias_o: f32,
 
     // ========================================================================
     // ELIGIBILITY TRACES
     // ========================================================================
 
-    /// Traces for Input → Hidden synapses
+    /// Traces for Input → Hidden synapses. Shape: [HIDDEN_SIZE][INPUT_SIZE]
     pub traces_ih: [[f32; INPUT_SIZE]; HIDDEN_SIZE],
 
-    /// Traces for Hidden → Output synapses
-    pub traces_ho: [[f32; HIDDEN_SIZE]; OUTPUT_SIZE],
+    /// Traces for Hidden → Output synapses. Shape: [HIDDEN_SIZE]
+    pub traces_ho: [f32; HIDDEN_SIZE],
 
-    /// Traces for hidden thresholds
-    pub traces_th: [f32; HIDDEN_SIZE],
+    /// Bias traces for hidden neurons (1.0 if fired, decays).
+    pub trace_bias_h: [f32; HIDDEN_SIZE],
 
-    /// Traces for output thresholds
-    pub traces_to: [f32; OUTPUT_SIZE],
+    /// Bias trace for output neuron (1.0 if fired, decays).
+    pub trace_bias_o: f32,
 
     // ========================================================================
-    // NEURON STATE (double-buffered for pipeline)
+    // NEURON STATE (no double buffering — fires in one tick)
     // ========================================================================
 
-    /// Hidden layer activations from LAST tick
+    /// Hidden layer activations (current tick).
     pub hidden: [bool; HIDDEN_SIZE],
 
-    /// Hidden layer activations being computed THIS tick
-    pub hidden_next: [bool; HIDDEN_SIZE],
-
-    /// Output layer activations from LAST tick
-    pub output: [bool; OUTPUT_SIZE],
-
-    /// Output layer activations being computed THIS tick
-    pub output_next: [bool; OUTPUT_SIZE],
+    /// Output bit (current tick).
+    pub output: bool,
 
     // ========================================================================
     // LEARNING STATE
     // ========================================================================
 
-    /// Current dopamine level (can be negative for punishment)
+    /// Current reward signal: +1.0 (dopamine) or -cortisol_strength.
+    /// Consumed after learn().
     pub dopamine: f32,
 
-    /// Frustration level (drives exploration via noise injection)
-    /// 0.0 = calm (succeeding), 1.0 = frantic (failing)
+    /// Frustration level (drives noise injection).
+    /// 0.0 = calm, 1.0 = frantic.
     pub frustration: f32,
+
+    /// Per-Spore rolling accuracy (EMA).
+    pub recent_accuracy: f32,
+
+    /// Ticks this Spore has been alive (for rejuvenation grace period).
+    pub ticks_alive: u64,
+
+    /// Output firing rate EMA for activity homeostasis.
+    /// Tracks how often this Spore's output neuron fires.
+    pub firing_rate: f32,
 
     // ========================================================================
     // HYPERPARAMETERS
     // ========================================================================
 
-    /// Learning rate (scaled by 100x internally)
     pub learning_rate: f32,
-
-    /// Trace decay per tick
     pub trace_decay: f32,
-
-    /// Base spontaneous firing rate
     pub base_noise: f32,
-
-    /// Maximum noise boost at full frustration
     pub max_noise_boost: f32,
-
-    /// EMA alpha for frustration updates (higher = more reactive)
-    /// Only used when accuracy >= 50%; below 50% always spikes to 1.0
     pub frustration_alpha: f32,
-
-    /// Ticks between weight decay applications
     pub weight_decay_interval: u64,
+    pub cortisol_strength: f32,
+    pub target_rate: f32,
+    pub homeostasis_rate: f32,
 }
 
 impl Spore {
-    /// Create a new Spore with random weights and default hyperparameters.
-    ///
-    /// Thresholds are initialized to 0 (Fix 5: "trigger happy" bootstrap)
-    /// to ensure neurons fire at birth and generate traces for learning.
-    pub fn new() -> Self {
-        Self::with_params(
-            DEFAULT_LEARNING_RATE as f32,
-            DEFAULT_TRACE_DECAY as f32,
-            DEFAULT_BASE_NOISE as f32,
-            DEFAULT_MAX_NOISE_BOOST as f32,
-        )
-    }
-
-    /// Create a new Spore with custom hyperparameters.
-    pub fn with_params(
-        learning_rate: f32,
-        trace_decay: f32,
-        base_noise: f32,
-        max_noise_boost: f32,
-    ) -> Self {
-        Self::with_full_params(
-            learning_rate,
-            trace_decay,
-            base_noise,
-            max_noise_boost,
-            0.2,  // Default frustration_alpha
-            WEIGHT_DECAY_INTERVAL as u64,  // Default weight_decay_interval
-        )
-    }
-
-    /// Create a new Spore with all hyperparameters specified.
-    pub fn with_full_params(
+    /// Create a new Spore with specified hyperparameters.
+    pub fn new(
         learning_rate: f32,
         trace_decay: f32,
         base_noise: f32,
         max_noise_boost: f32,
         frustration_alpha: f32,
         weight_decay_interval: u64,
+        cortisol_strength: f32,
     ) -> Self {
-        let mut weights_ih = [[0i16; INPUT_SIZE]; HIDDEN_SIZE];
-        let mut weights_ho = [[0i16; HIDDEN_SIZE]; OUTPUT_SIZE];
+        let mut weights_ih = [[0.0_f32; INPUT_SIZE]; HIDDEN_SIZE];
+        let mut weights_ho = [0.0_f32; HIDDEN_SIZE];
 
-        for h in 0..HIDDEN_SIZE {
+        for j in 0..HIDDEN_SIZE {
             for i in 0..INPUT_SIZE {
-                weights_ih[h][i] = random_weight();
+                weights_ih[j][i] = random_weight();
             }
-        }
-
-        for o in 0..OUTPUT_SIZE {
-            for h in 0..HIDDEN_SIZE {
-                weights_ho[o][h] = random_weight();
-            }
+            weights_ho[j] = random_weight();
         }
 
         Self {
             weights_ih,
             weights_ho,
-            thresholds_h: [INIT_THRESHOLD as i16; HIDDEN_SIZE],
-            thresholds_o: [INIT_THRESHOLD as i16; OUTPUT_SIZE],
+            bias_h: [INITIAL_BIAS; HIDDEN_SIZE],
+            bias_o: INITIAL_BIAS,
             traces_ih: [[0.0; INPUT_SIZE]; HIDDEN_SIZE],
-            traces_ho: [[0.0; HIDDEN_SIZE]; OUTPUT_SIZE],
-            traces_th: [0.0; HIDDEN_SIZE],
-            traces_to: [0.0; OUTPUT_SIZE],
+            traces_ho: [0.0; HIDDEN_SIZE],
+            trace_bias_h: [0.0; HIDDEN_SIZE],
+            trace_bias_o: 0.0,
             hidden: [false; HIDDEN_SIZE],
-            hidden_next: [false; HIDDEN_SIZE],
-            output: [false; OUTPUT_SIZE],
-            output_next: [false; OUTPUT_SIZE],
+            output: false,
             dopamine: 0.0,
-            frustration: 1.0,
+            frustration: 1.0, // Start fully frustrated (explore)
+            recent_accuracy: 0.0,
+            ticks_alive: 0,
+            firing_rate: 0.0,
             learning_rate,
             trace_decay,
             base_noise,
             max_noise_boost,
             frustration_alpha,
             weight_decay_interval,
+            cortisol_strength,
+            target_rate: DEFAULT_TARGET_RATE,
+            homeostasis_rate: DEFAULT_HOMEOSTASIS_RATE,
         }
     }
 
-    /// Propagate input through the network (one tick).
-    ///
-    /// This implements pipelined propagation:
-    /// - Input → Hidden: writes to hidden_next
-    /// - Hidden → Output: reads from hidden (last tick), writes to output_next
-    ///
-    /// Traces are set to 1.0 for synapses that participate in firing.
-    ///
-    /// # Arguments
-    /// * `input` - The input byte (each bit is one input neuron)
-    pub fn propagate(&mut self, input: u8) {
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
+    /// Create a Spore with default hyperparameters.
+    pub fn default_params() -> Self {
+        Self::new(
+            DEFAULT_LEARNING_RATE,
+            DEFAULT_TRACE_DECAY,
+            DEFAULT_BASE_NOISE,
+            DEFAULT_MAX_NOISE_BOOST,
+            DEFAULT_FRUSTRATION_ALPHA,
+            DEFAULT_WEIGHT_DECAY_INTERVAL,
+            DEFAULT_CORTISOL_STRENGTH,
+        )
+    }
 
-        // Calculate current noise rate based on frustration
+    /// Forward pass: compute hidden layer and output bit.
+    ///
+    /// Hidden layer uses Winner-Take-All (lateral inhibition):
+    /// only the neuron with the highest sum fires via threshold.
+    /// Suppressed neurons can still fire via noise (exploration).
+    /// This forces hidden neurons to specialize on different features.
+    ///
+    /// Output uses hard threshold: `sum + bias > 0.0` → fires.
+    /// Sets eligibility traces for active synapses.
+    pub fn fire(&mut self, inputs: &[f32; INPUT_SIZE]) -> bool {
+        let mut rng = rand::thread_rng();
         let noise_rate = self.base_noise + (self.frustration * self.max_noise_boost);
 
         // ====================================================================
-        // INPUT → HIDDEN (writes to hidden_next)
+        // HIDDEN LAYER — Winner-Take-All (Lateral Inhibition)
         // ====================================================================
-        for h in 0..HIDDEN_SIZE {
-            // Compute weighted sum of inputs
-            let mut sum: i32 = 0;
+
+        // Step 1: Compute all hidden sums
+        let mut sums = [0.0_f32; HIDDEN_SIZE];
+        for j in 0..HIDDEN_SIZE {
+            sums[j] = self.bias_h[j];
             for i in 0..INPUT_SIZE {
-                let bit = ((input >> i) & 1) as i32;
-                sum += bit * self.weights_ih[h][i] as i32;
+                sums[j] += inputs[i] * self.weights_ih[j][i];
+            }
+        }
+
+        // Step 2: Find the winner (highest sum)
+        let mut winner = 0;
+        for j in 1..HIDDEN_SIZE {
+            if sums[j] > sums[winner] {
+                winner = j;
+            }
+        }
+
+        // Step 3: Winner fires via threshold; suppressed fire only via noise
+        for j in 0..HIDDEN_SIZE {
+            if j == winner {
+                self.hidden[j] = sums[j] > 0.0 || rng.gen::<f32>() < noise_rate;
+            } else {
+                self.hidden[j] = rng.gen::<f32>() < noise_rate;
             }
 
-            // Hard threshold with noise injection
-            let fires = sum > self.thresholds_h[h] as i32
-                || rng.gen::<f32>() < noise_rate;
-
-            self.hidden_next[h] = fires;
-
-            // Set traces for synapses that contributed to firing
-            if fires {
+            // Set traces for active synapses
+            if self.hidden[j] {
                 for i in 0..INPUT_SIZE {
-                    if (input >> i) & 1 == 1 {
-                        self.traces_ih[h][i] = 1.0;
+                    if inputs[i] > 0.5 {
+                        self.traces_ih[j][i] = 1.0;
                     }
                 }
-                self.traces_th[h] = 1.0;  // Threshold trace
+                self.trace_bias_h[j] = 1.0;
             }
         }
 
         // ====================================================================
-        // HIDDEN → OUTPUT (reads from hidden, writes to output_next)
-        // Note: Uses hidden (last tick), NOT hidden_next (this tick)
-        // This is the pipelined behavior.
+        // OUTPUT (hard threshold)
         // ====================================================================
-        for o in 0..OUTPUT_SIZE {
-            // Compute weighted sum of hidden activations
-            let mut sum: i32 = 0;
-            for h in 0..HIDDEN_SIZE {
-                sum += self.hidden[h] as i32 * self.weights_ho[o][h] as i32;
+        let mut sum = self.bias_o;
+        for j in 0..HIDDEN_SIZE {
+            if self.hidden[j] {
+                sum += self.weights_ho[j];
             }
+        }
 
-            // Hard threshold with noise injection
-            let fires = sum > self.thresholds_o[o] as i32
-                || rng.gen::<f32>() < noise_rate;
+        self.output = sum > 0.0 || rng.gen::<f32>() < noise_rate;
 
-            self.output_next[o] = fires;
-
-            // Set traces for synapses that contributed to firing
-            if fires {
-                for h in 0..HIDDEN_SIZE {
-                    if self.hidden[h] {
-                        self.traces_ho[o][h] = 1.0;
-                    }
+        // Set output traces
+        if self.output {
+            for j in 0..HIDDEN_SIZE {
+                if self.hidden[j] {
+                    self.traces_ho[j] = 1.0;
                 }
-                self.traces_to[o] = 1.0;  // Threshold trace
             }
+            self.trace_bias_o = 1.0;
         }
+
+        // Update firing rate EMA for activity homeostasis
+        let fired = if self.output { 1.0_f32 } else { 0.0 };
+        self.firing_rate = 0.99 * self.firing_rate + 0.01 * fired;
+
+        self.output
     }
 
-    /// Convert output activations to a byte.
+    /// Receive per-bit boolean reward.
     ///
-    /// Each output neuron corresponds to one bit of the output byte.
-    /// output[0] = bit 0 (LSB), output[7] = bit 7 (MSB)
-    pub fn output_as_byte(&self) -> u8 {
-        let mut byte = 0u8;
-        for (i, &bit) in self.output.iter().enumerate() {
-            if bit {
-                byte |= 1 << i;
-            }
-        }
-        byte
-    }
+    /// - correct=true  → dopamine = +1.0 (strengthen active traces)
+    /// - correct=false → dopamine = -cortisol_strength (weaken active traces)
+    ///
+    /// Updates per-Spore frustration using `recent_accuracy` (EMA), NOT per-tick:
+    /// - recent_accuracy < 50% → instant spike to 1.0 (Fix 2, non-negotiable)
+    /// - recent_accuracy >= 50% → EMA with frustration_alpha
+    ///
+    /// IMPORTANT: We check recent_accuracy (EMA) for the spike, not per-tick accuracy.
+    /// Per-tick accuracy for a 1-bit output is binary (0.0 or 1.0). If we spiked on
+    /// every wrong tick, a Spore at 90% accuracy would spike every ~10th tick and
+    /// frustration would never settle. Using EMA preserves Fix 2's intent: "if I'm
+    /// *generally* failing, panic."
+    pub fn receive_reward(&mut self, correct: bool) {
+        let accuracy = if correct { 1.0_f32 } else { 0.0 };
 
-    /// Receive reward signal and update dopamine/frustration.
-    ///
-    /// # Arguments
-    /// * `correct_bits` - Number of output bits that matched expected (0-8)
-    ///
-    /// # Dopamine Calculation (Fix 3: Anti-Hebbian)
-    /// - dopamine = (accuracy²) - (BASELINE_ACCURACY²)
-    /// - At 100% accuracy: 1.0 - 0.25 = +0.75 (strong reward)
-    /// - At 50% accuracy: 0.25 - 0.25 = 0 (neutral)
-    /// - At 0% accuracy: 0 - 0.25 = -0.25 (punishment)
-    ///
-    /// # Frustration Update (Fix 2: Fast Response)
-    /// - If accuracy < 50%: spike to 1.0 immediately
-    /// - Otherwise: EMA with α=0.2
-    pub fn receive_reward(&mut self, correct_bits: u8) {
-        let accuracy = correct_bits as f32 / 8.0;
+        // Update per-Spore accuracy EMA (BEFORE frustration check)
+        self.recent_accuracy = 0.95 * self.recent_accuracy + 0.05 * accuracy;
 
-        // Fix 3: Signed dopamine - below baseline = punishment
-        let reward = accuracy * accuracy;
-        let baseline_reward = BASELINE_ACCURACY as f32 * BASELINE_ACCURACY as f32;
-        self.dopamine = reward - baseline_reward;
-
-        // Fix 2: Fast frustration response
-        if accuracy < 0.5 {
-            self.frustration = 1.0;  // Instant spike (non-negotiable)
+        // Frustration update (Fix 2: spike based on TREND, not single tick)
+        if self.recent_accuracy < BASELINE_ACCURACY {
+            self.frustration = 1.0;
         } else {
-            // Tunable EMA for fine-tuning phase
             self.frustration = (1.0 - self.frustration_alpha) * self.frustration
                 + self.frustration_alpha * (1.0 - accuracy);
         }
+
+        // Signed dopamine
+        self.dopamine = if correct { 1.0 } else { -self.cortisol_strength };
     }
 
-    /// Apply Hebbian learning based on current dopamine and traces.
+    /// Apply Hebbian learning using signed dopamine and traces.
     ///
-    /// For each synapse: weight += lr_scaled * dopamine * trace
-    /// For each threshold: threshold -= lr_scaled * dopamine * trace
+    /// Learning rate is gated by accuracy: `effective_lr = lr * (1 - recent_accuracy)`.
+    /// Converged Spores (high accuracy) learn slowly, preventing catastrophic forgetting.
+    /// Newborn Spores (accuracy=0) learn at full speed.
     ///
-    /// Dopamine can be negative (Fix 3: Anti-Hebbian), causing weights to
-    /// decrease and thresholds to increase.
+    /// `weight += effective_lr * dopamine * trace`
+    /// `bias   += effective_lr * dopamine * trace_b`
     ///
-    /// Uses stochastic rounding to handle small updates that would otherwise
-    /// truncate to zero in integer math.
-    ///
-    /// Consumes dopamine after learning (atomic update).
+    /// Dopamine is consumed (set to 0) after learning.
     pub fn learn(&mut self) {
-        use crate::utils::stochastic_round;
-
-        // Skip if no dopamine signal
         if self.dopamine.abs() < 0.001 {
             return;
         }
 
-        let lr_scaled = self.learning_rate * 100.0;
         let d = self.dopamine;
+        let lr = self.learning_rate * (1.0 - self.recent_accuracy);
 
-        // Update Input → Hidden weights
-        for h in 0..HIDDEN_SIZE {
+        // Update Input → Hidden weights and biases
+        for j in 0..HIDDEN_SIZE {
             for i in 0..INPUT_SIZE {
-                let change = lr_scaled * d * self.traces_ih[h][i];
-                let delta = stochastic_round(change);
-                self.weights_ih[h][i] = self.weights_ih[h][i].saturating_add(delta);
+                self.weights_ih[j][i] += lr * d * self.traces_ih[j][i];
             }
-
-            // Update hidden threshold
-            let t_change = lr_scaled * d * self.traces_th[h];
-            let t_delta = stochastic_round(t_change);
-            // Positive dopamine → decrease threshold (more eager)
-            // Negative dopamine → increase threshold (more stubborn)
-            self.thresholds_h[h] = self.thresholds_h[h].saturating_sub(t_delta);
+            self.bias_h[j] += lr * d * self.trace_bias_h[j];
         }
 
-        // Update Hidden → Output weights
-        for o in 0..OUTPUT_SIZE {
-            for h in 0..HIDDEN_SIZE {
-                let change = lr_scaled * d * self.traces_ho[o][h];
-                let delta = stochastic_round(change);
-                self.weights_ho[o][h] = self.weights_ho[o][h].saturating_add(delta);
-            }
-
-            // Update output threshold
-            let t_change = lr_scaled * d * self.traces_to[o];
-            let t_delta = stochastic_round(t_change);
-            self.thresholds_o[o] = self.thresholds_o[o].saturating_sub(t_delta);
+        // Update Hidden → Output weights and bias
+        for j in 0..HIDDEN_SIZE {
+            self.weights_ho[j] += lr * d * self.traces_ho[j];
         }
+        self.bias_o += lr * d * self.trace_bias_o;
 
-        // Consume dopamine (atomic update)
+        // Consume dopamine
         self.dopamine = 0.0;
     }
 
-    /// Apply homeostasis: weight decay, weight normalization, threshold drift.
+    /// Maintenance: decay traces, apply weight decay, activity homeostasis.
     ///
-    /// # Weight Decay (every WEIGHT_DECAY_INTERVAL ticks)
-    /// Each weight loses ~1.5% of its value: w -= w >> 6
-    ///
-    /// # Weight Normalization (Fix 1: every tick)
-    /// If sum of absolute weights for a neuron exceeds MAX_WEIGHT_SUM,
-    /// all weights for that neuron are scaled down proportionally.
-    ///
-    /// # Threshold Drift (every tick)
-    /// Thresholds drift toward DEFAULT_THRESHOLD by ±1.
-    ///
-    /// # Arguments
-    /// * `tick` - Current simulation tick
+    /// - Traces decay by trace_decay each tick
+    /// - Weights AND hidden biases decay by *0.99 every weight_decay_interval ticks
+    /// - Output bias NOT decayed (controlled by homeostasis instead)
+    /// - Activity homeostasis: nudge bias_o toward target firing rate
+    /// - ticks_alive incremented for rejuvenation tracking
     pub fn maintain(&mut self, tick: u64) {
-        // ====================================================================
-        // WEIGHT DECAY (every WEIGHT_DECAY_INTERVAL ticks)
-        // ====================================================================
-        if self.weight_decay_interval > 0 && tick % self.weight_decay_interval == 0 && tick > 0 {
-            for row in &mut self.weights_ih {
-                for w in row {
-                    *w -= *w >> 6;  // ~1.5% decay
-                }
-            }
-            for row in &mut self.weights_ho {
-                for w in row {
-                    *w -= *w >> 6;
-                }
-            }
-        }
+        self.ticks_alive += 1;
 
-        // ====================================================================
-        // WEIGHT NORMALIZATION (Fix 1: per-neuron budget)
-        // ====================================================================
+        // Activity homeostasis: keep output neuron at target firing rate
+        let diff = self.target_rate - self.firing_rate;
+        self.bias_o += self.homeostasis_rate * diff;
 
-        // Input → Hidden weights
-        for h in 0..HIDDEN_SIZE {
-            let sum: i32 = self.weights_ih[h].iter().map(|&w| w.abs() as i32).sum();
-            if sum > MAX_WEIGHT_SUM {
-                let scale = MAX_WEIGHT_SUM as f32 / sum as f32;
-                for w in &mut self.weights_ih[h] {
-                    *w = (*w as f32 * scale) as i16;
-                }
-            }
-        }
-
-        // Hidden → Output weights
-        for o in 0..OUTPUT_SIZE {
-            let sum: i32 = self.weights_ho[o].iter().map(|&w| w.abs() as i32).sum();
-            if sum > MAX_WEIGHT_SUM {
-                let scale = MAX_WEIGHT_SUM as f32 / sum as f32;
-                for w in &mut self.weights_ho[o] {
-                    *w = (*w as f32 * scale) as i16;
-                }
-            }
-        }
-
-        // ====================================================================
-        // THRESHOLD DRIFT (every tick)
-        // ====================================================================
-        let default_t = DEFAULT_THRESHOLD as i16;
-        for t in &mut self.thresholds_h {
-            if *t < default_t {
-                *t += 1;
-            } else if *t > default_t {
-                *t -= 1;
-            }
-        }
-        for t in &mut self.thresholds_o {
-            if *t < default_t {
-                *t += 1;
-            } else if *t > default_t {
-                *t -= 1;
-            }
-        }
-    }
-
-    /// Advance the pipeline and decay traces.
-    ///
-    /// This must be called after propagate() each tick:
-    /// 1. Copies hidden_next → hidden, output_next → output
-    /// 2. Decays all eligibility traces by trace_decay
-    pub fn tick_end(&mut self) {
-        // Advance the pipeline
-        self.hidden = self.hidden_next;
-        self.output = self.output_next;
-
-        // Decay all traces
+        // Trace decay
         for row in &mut self.traces_ih {
             for t in row {
                 *t *= self.trace_decay;
             }
         }
-        for row in &mut self.traces_ho {
-            for t in row {
-                *t *= self.trace_decay;
+        for t in &mut self.traces_ho {
+            *t *= self.trace_decay;
+        }
+        for t in &mut self.trace_bias_h {
+            *t *= self.trace_decay;
+        }
+        self.trace_bias_o *= self.trace_decay;
+
+        // Weight decay (every weight_decay_interval ticks)
+        if self.weight_decay_interval > 0
+            && tick % self.weight_decay_interval == 0
+            && tick > 0
+        {
+            for row in &mut self.weights_ih {
+                for w in row {
+                    *w *= 0.99;
+                }
             }
-        }
-        for t in &mut self.traces_th {
-            *t *= self.trace_decay;
-        }
-        for t in &mut self.traces_to {
-            *t *= self.trace_decay;
+            for w in &mut self.weights_ho {
+                *w *= 0.99;
+            }
+            // Hidden biases pulled toward INITIAL_BIAS to prevent runaway.
+            // Caps upside (can't grow to 42+) while protecting downside (can't collapse to 0).
+            // Output bias NOT decayed (controlled by activity homeostasis instead).
+            for b in &mut self.bias_h {
+                *b = *b * 0.99 + INITIAL_BIAS * 0.01;
+            }
         }
     }
 
-    /// Dump weights as a simple ASCII visualization.
+    /// Reset this Spore to random initial state (rejuvenation).
     ///
-    /// Shows Input→Hidden weights as a 32x8 grid where each cell
-    /// is a character representing weight magnitude.
-    pub fn dump_weights_ascii(&self) {
-        println!("Input→Hidden Weights (32 rows x 8 cols):");
-        println!("  01234567");
-        for h in 0..HIDDEN_SIZE {
-            print!("{:2} ", h);
+    /// Same slot, new brain. Weights, biases, traces, frustration all reset.
+    pub fn reset(&mut self) {
+        for j in 0..HIDDEN_SIZE {
             for i in 0..INPUT_SIZE {
-                let w = self.weights_ih[h][i];
-                let c = if w > 100 { '█' }
-                    else if w > 50 { '▓' }
-                    else if w > 0 { '▒' }
-                    else if w > -50 { '░' }
-                    else { ' ' };
-                print!("{}", c);
+                self.weights_ih[j][i] = random_weight();
             }
-            println!();
+            self.weights_ho[j] = random_weight();
         }
-        println!();
 
-        println!("Hidden→Output Weights (8 rows x 32 cols):");
-        print!("   ");
-        for h in 0..HIDDEN_SIZE {
-            print!("{}", h % 10);
-        }
-        println!();
-        for o in 0..OUTPUT_SIZE {
-            print!("{}: ", o);
-            for h in 0..HIDDEN_SIZE {
-                let w = self.weights_ho[o][h];
-                let c = if w > 100 { '█' }
-                    else if w > 50 { '▓' }
-                    else if w > 0 { '▒' }
-                    else if w > -50 { '░' }
-                    else { ' ' };
-                print!("{}", c);
-            }
-            println!();
-        }
-    }
-}
-
-impl Default for Spore {
-    fn default() -> Self {
-        Self::new()
+        self.bias_h = [INITIAL_BIAS; HIDDEN_SIZE];
+        self.bias_o = INITIAL_BIAS;
+        self.traces_ih = [[0.0; INPUT_SIZE]; HIDDEN_SIZE];
+        self.traces_ho = [0.0; HIDDEN_SIZE];
+        self.trace_bias_h = [0.0; HIDDEN_SIZE];
+        self.trace_bias_o = 0.0;
+        self.hidden = [false; HIDDEN_SIZE];
+        self.output = false;
+        self.dopamine = 0.0;
+        self.frustration = 1.0;
+        self.recent_accuracy = 0.0;
+        self.ticks_alive = 0;
+        self.firing_rate = 0.0;
     }
 }
