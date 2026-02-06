@@ -56,6 +56,37 @@ impl Simulation {
         }
     }
 
+    /// Create a new Simulation with all tunable parameters.
+    ///
+    /// Used by the genetic tuner and --params CLI flag.
+    pub fn with_full_params(
+        reward_latency: u64,
+        trace_decay: f32,
+        input_hold_ticks: u64,
+        learning_rate: f32,
+        max_noise_boost: f32,
+        weight_decay_interval: u64,
+        frustration_alpha: f32,
+    ) -> Self {
+        let spore = Spore::with_full_params(
+            learning_rate,
+            trace_decay,
+            DEFAULT_BASE_NOISE as f32,  // Fixed at 0.001 (not tuned)
+            max_noise_boost,
+            frustration_alpha,
+            weight_decay_interval,
+        );
+        let env = Environment::with_params(reward_latency, input_hold_ticks);
+
+        Self {
+            spore,
+            env,
+            tick: 0,
+            recent_accuracy: 0.0,
+            accuracy_history: Vec::new(),
+        }
+    }
+
     /// Get a reference to the Environment (for testing).
     pub fn env(&self) -> &Environment {
         &self.env
@@ -68,6 +99,12 @@ impl Simulation {
 
     /// Execute one simulation step.
     ///
+    /// Returns `Some(accuracy)` when a reward is delivered this tick (instantaneous
+    /// per-tick accuracy as correct_bits/8.0), or `None` if no reward was due.
+    ///
+    /// CRITICAL: The tuner uses this return value for stability detection.
+    /// Do NOT use `recent_accuracy` (EMA) for stability -- it lags by ~30-45 ticks.
+    ///
     /// The heartbeat - CRITICAL: tick_end() BEFORE propagate()!
     /// 1. TICK_END FIRST: Advance pipeline, decay traces
     /// 2. SENSE: Get input from environment
@@ -77,7 +114,7 @@ impl Simulation {
     /// 6. REWARD: Inject dopamine if reward delivered
     /// 7. LEARN: Apply Hebbian update
     /// 8. MAINTAIN: Weight decay, normalization, threshold drift
-    pub fn step(&mut self) {
+    pub fn step(&mut self) -> Option<f32> {
         // 1. TICK_END FIRST (advance pipeline, decay traces)
         // This MUST happen before propagate for correct 2-tick latency!
         // - Swaps hidden_next -> hidden, output_next -> output
@@ -95,14 +132,17 @@ impl Simulation {
         let output = self.spore.output_as_byte();
 
         // 5. ENVIRONMENT STEP
-        if let Some(correct_bits) = self.env.tick(self.tick, output) {
+        let tick_accuracy = if let Some(correct_bits) = self.env.tick(self.tick, output) {
             // 6. REWARD
             self.spore.receive_reward(correct_bits);
 
             // Track accuracy
             let accuracy = correct_bits as f32 / 8.0;
             self.recent_accuracy = 0.95 * self.recent_accuracy + 0.05 * accuracy;
-        }
+            Some(accuracy)
+        } else {
+            None
+        };
 
         // 7. LEARN
         self.spore.learn();
@@ -111,12 +151,14 @@ impl Simulation {
         self.spore.maintain(self.tick);
 
         self.tick += 1;
+
+        tick_accuracy
     }
 
     /// Run simulation for a given number of ticks.
     pub fn run(&mut self, max_ticks: u64, log_interval: u64) -> f32 {
         while self.tick < max_ticks {
-            self.step();
+            let _ = self.step();
 
             // Logging
             if log_interval > 0 && self.tick % log_interval == 0 {
