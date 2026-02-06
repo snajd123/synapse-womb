@@ -12,6 +12,7 @@ use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 
 use crate::simulation::Simulation;
+use crate::constants::*;
 
 /// A genome encoding 7 tunable hyperparameters for the Swarm.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -258,7 +259,7 @@ pub fn evaluate_full(genome: &Genome, ticks: u64) -> EvalResult {
 /// Stability: 1000 consecutive ticks >= 90%, revoked if < 85%.
 fn evaluate_single(genome: &Genome, ticks: u64, allow_early_exit: bool) -> EvalResult {
     let mut sim = Simulation::with_full_params(
-        8,  // n_outputs (mirror task)
+        DEFAULT_SWARM_SIZE,  // n_outputs (mirror task)
         genome.input_hold_ticks,
         genome.learning_rate,
         genome.trace_decay,

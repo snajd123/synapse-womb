@@ -111,15 +111,22 @@ impl Simulation {
 
             // Logging
             if log_interval > 0 && self.tick % log_interval == 0 {
-                // Report per-Spore accuracies
-                let spore_accs: Vec<String> = self.swarm.spores.iter()
-                    .map(|s| format!("{:.0}", s.recent_accuracy * 100.0))
-                    .collect();
+                // Report per-bit best accuracies (consensus view)
+                let mut bit_accs = Vec::new();
+                for k in 0..8 {
+                    let best = self.swarm.spores.iter()
+                        .enumerate()
+                        .filter(|(i, _)| i % 8 == k)
+                        .map(|(_, s)| s.recent_accuracy)
+                        .max_by(|a, b| a.total_cmp(b))
+                        .unwrap_or(0.0);
+                    bit_accs.push(format!("{:.0}", best * 100.0));
+                }
                 eprintln!(
-                    "Tick {}: swarm_acc={:.2}% bits=[{}]",
+                    "Tick {}: consensus_acc={:.2}% bits=[{}]",
                     self.tick,
-                    self.recent_accuracy * 100.0,
-                    spore_accs.join(","),
+                    self.swarm.accuracy() * 100.0,
+                    bit_accs.join(","),
                 );
                 self.accuracy_history.push(self.recent_accuracy);
             }
