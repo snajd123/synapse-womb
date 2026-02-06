@@ -555,18 +555,18 @@ fn test_homeostasis_increases_bias_when_silent() {
     s.firing_rate = 0.0; // Dead neuron
     let original_bias = s.bias_o;
     s.maintain(1);
-    // diff = 0.1 - 0.0 = 0.1, bias_o += 0.01 * 0.1 = 0.001
+    // diff = 0.5 - 0.0 = 0.5, bias_o += 0.01 * 0.5 = 0.005
     assert!(s.bias_o > original_bias, "Homeostasis should increase bias_o for silent Spore");
-    assert!((s.bias_o - original_bias - 0.001).abs() < 0.0001);
+    assert!((s.bias_o - original_bias - 0.005).abs() < 0.0001);
 }
 
 #[test]
 fn test_homeostasis_decreases_bias_when_overactive() {
     let mut s = Spore::default_params();
-    s.firing_rate = 0.5; // Firing 50% of the time (target is 10%)
+    s.firing_rate = 0.9; // Firing 90% of the time (target is 50%)
     let original_bias = s.bias_o;
     s.maintain(1);
-    // diff = 0.1 - 0.5 = -0.4, bias_o += 0.01 * -0.4 = -0.004
+    // diff = 0.5 - 0.9 = -0.4, bias_o += 0.01 * -0.4 = -0.004
     assert!(s.bias_o < original_bias, "Homeostasis should decrease bias_o for overactive Spore");
     assert!((s.bias_o - original_bias + 0.004).abs() < 0.0001);
 }
