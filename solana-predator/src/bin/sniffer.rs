@@ -11,8 +11,6 @@ use solana_predator::record::{write_record, Record};
 use solana_predator::source::{AccountUpdate, MarketConfig, Source};
 use std::fs::OpenOptions;
 use std::io::BufWriter;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Offset of the `amount` field (u64 LE) in an SPL Token Account.
@@ -68,6 +66,34 @@ fn extract_token_amount(data: &[u8]) -> Option<u64> {
             .try_into()
             .ok()?,
     ))
+}
+
+/// Emit a Record from the buffered AMM update and current vault balances.
+fn flush_record(
+    pending_amm: &mut Option<(u64, Vec<u8>)>,
+    coin_balance: u64,
+    pc_balance: u64,
+    record_tx: &mpsc::Sender<Record>,
+    record_count: &mut u64,
+) {
+    if let Some((slot, data)) = pending_amm.take() {
+        let record = Record::from_raw(slot, &data, coin_balance, pc_balance);
+
+        *record_count += 1;
+        if *record_count % 100 == 0 {
+            eprintln!(
+                "  Records: {} | Slot: {} | Price: ~{:.2} USDC/SOL",
+                record_count, slot, record.price(9, 6),
+            );
+        }
+
+        if record_tx.try_send(record).is_err() {
+            eprintln!(
+                "  WARNING: Writer backpressure, record dropped at slot {}",
+                slot
+            );
+        }
+    }
 }
 
 fn build_source(name: &str) -> Result<Source> {
@@ -161,9 +187,9 @@ async fn main() -> Result<()> {
         Ok(())
     });
 
-    // Track latest vault balances (updated asynchronously).
-    let coin_amount = Arc::new(AtomicU64::new(0));
-    let pc_amount = Arc::new(AtomicU64::new(0));
+    // Vault balances persist across reconnects (still valid if unchanged).
+    let mut coin_balance: u64 = 0;
+    let mut pc_balance: u64 = 0;
     let mut record_count: u64 = 0;
     let mut session: u64 = 0;
 
@@ -171,6 +197,12 @@ async fn main() -> Result<()> {
     loop {
         session += 1;
         eprintln!("[session {}] Connecting via {}...", session, args.source);
+
+        // Slot tracking and pending AMM reset per session — slot numbers
+        // from the old stream are meaningless after reconnect.
+        let mut coin_slot: u64 = 0;
+        let mut pc_slot: u64 = 0;
+        let mut pending_amm: Option<(u64, Vec<u8>)> = None;
 
         let (update_tx, mut update_rx) = mpsc::channel::<AccountUpdate>(UPDATE_CHANNEL_SIZE);
 
@@ -193,37 +225,41 @@ async fn main() -> Result<()> {
             if update.pubkey == args.coin_vault {
                 if update.data.len() >= TOKEN_ACCOUNT_SIZE {
                     if let Some(amount) = extract_token_amount(&update.data) {
-                        coin_amount.store(amount, Ordering::Relaxed);
+                        coin_balance = amount;
+                        coin_slot = update.slot;
                     }
                 }
             } else if update.pubkey == args.pc_vault {
                 if update.data.len() >= TOKEN_ACCOUNT_SIZE {
                     if let Some(amount) = extract_token_amount(&update.data) {
-                        pc_amount.store(amount, Ordering::Relaxed);
+                        pc_balance = amount;
+                        pc_slot = update.slot;
                     }
                 }
             } else if update.pubkey == args.pool {
-                let record = Record::from_raw(
-                    update.slot,
-                    &update.data,
-                    coin_amount.load(Ordering::Relaxed),
-                    pc_amount.load(Ordering::Relaxed),
-                );
-
-                record_count += 1;
-                if record_count % 100 == 0 {
-                    eprintln!(
-                        "  Records: {} | Slot: {} | Price: ~{:.2} USDC/SOL",
-                        record_count,
-                        update.slot,
-                        record.price(9, 6),
+                // Flush any older buffered AMM with best-available vault data
+                // rather than dropping it entirely.
+                if pending_amm.is_some() {
+                    flush_record(
+                        &mut pending_amm,
+                        coin_balance,
+                        pc_balance,
+                        &record_tx,
+                        &mut record_count,
                     );
                 }
+                pending_amm = Some((update.slot, update.data));
+            }
 
-                if record_tx.try_send(record).is_err() {
-                    eprintln!(
-                        "  WARNING: Writer backpressure, record dropped at slot {}",
-                        update.slot
+            // After any update, try to flush pending AMM if vaults have caught up.
+            if let Some((amm_slot, _)) = &pending_amm {
+                if coin_slot >= *amm_slot && pc_slot >= *amm_slot {
+                    flush_record(
+                        &mut pending_amm,
+                        coin_balance,
+                        pc_balance,
+                        &record_tx,
+                        &mut record_count,
                     );
                 }
             }
