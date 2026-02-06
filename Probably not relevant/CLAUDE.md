@@ -23,7 +23,7 @@ When using the `superpowers:requesting-code-review` skill, the code review agent
 - **base_noise fixed at 0.001**: Not tuned — hardcoded in `Simulation::with_full_params`.
 - **Per-tick accuracy**: The tuner uses instantaneous per-tick accuracy from `step()` return value, NOT the EMA `recent_accuracy`.
 - **Convergence revocation**: If accuracy drops below 85%, convergence status is revoked.
-- **Signed dopamine**: Correct → +1.0, Wrong → -cortisol_strength. Single formula for both weights and biases.
+- **Signed dopamine**: Correct → +1.0, Wrong → -cortisol_strength. Single formula for both weights and biases. Default cortisol = 1.0 (symmetric at chance). This is the mathematically correct value: E[reward] = 0 at 50% accuracy, so only predictive inputs get net positive weight change. Safe because accuracy-gated LR prevents catastrophic forgetting.
 - **Accuracy-Gated Learning Rate**: `effective_lr = lr * (1 - recent_accuracy)`. Converged Spores learn slowly; newborn Spores learn at full speed. Prevents catastrophic forgetting.
 - **Bias NOT decayed**: Biases are structural properties, not transient signals. Weight decay applies only to weights.
 - **Positive initial bias (INITIAL_BIAS = 0.5)**: Prevents "Initial Blackout" — neurons must fire from tick 1 so traces exist for learning. Without this, unlucky random weights → never fires → no traces → learn() does `weight += LR * reward * 0.0` forever.
