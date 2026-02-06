@@ -159,6 +159,114 @@ fn test_fire_no_traces_when_not_firing() {
 }
 
 // =============================================================================
+// Winner-Take-All (Lateral Inhibition)
+// =============================================================================
+
+#[test]
+fn test_fire_wta_only_winner_fires() {
+    let mut s = Spore::default_params();
+    s.base_noise = 0.0;
+    s.frustration = 0.0;
+
+    // Make neuron 2 the clear winner
+    s.bias_h = [-100.0; HIDDEN_SIZE];
+    s.bias_h[2] = 10.0;
+    s.bias_o = 100.0;
+
+    let inputs = [1.0; INPUT_SIZE];
+    s.fire(&inputs);
+
+    assert!(s.hidden[2], "Winner (H2) should fire");
+    assert!(!s.hidden[0], "Non-winner H0 should NOT fire (no noise)");
+    assert!(!s.hidden[1], "Non-winner H1 should NOT fire (no noise)");
+    assert!(!s.hidden[3], "Non-winner H3 should NOT fire (no noise)");
+}
+
+#[test]
+fn test_fire_wta_suppressed_neurons_no_traces() {
+    let mut s = Spore::default_params();
+    s.base_noise = 0.0;
+    s.frustration = 0.0;
+
+    // Make neuron 0 the winner, suppress others
+    for j in 0..HIDDEN_SIZE {
+        for i in 0..INPUT_SIZE {
+            s.weights_ih[j][i] = 0.0;
+        }
+    }
+    s.weights_ih[0][0] = 10.0;
+    s.bias_h = [0.0; HIDDEN_SIZE];
+    s.bias_h[0] = 5.0;
+    s.bias_o = 100.0;
+
+    let inputs = [1.0; INPUT_SIZE];
+    s.fire(&inputs);
+
+    assert_eq!(s.traces_ih[0][0], 1.0, "Winner should have trace on active input");
+    assert_eq!(s.trace_bias_h[0], 1.0, "Winner should have bias trace");
+
+    for j in 1..HIDDEN_SIZE {
+        assert_eq!(s.trace_bias_h[j], 0.0,
+            "Suppressed H{} should have no bias trace", j);
+    }
+}
+
+#[test]
+fn test_fire_wta_negative_winner_stays_silent() {
+    let mut s = Spore::default_params();
+    s.base_noise = 0.0;
+    s.frustration = 0.0;
+
+    s.bias_h = [-10.0; HIDDEN_SIZE];
+    for j in 0..HIDDEN_SIZE {
+        for i in 0..INPUT_SIZE {
+            s.weights_ih[j][i] = -1.0;
+        }
+    }
+
+    let inputs = [1.0; INPUT_SIZE];
+    s.fire(&inputs);
+
+    for j in 0..HIDDEN_SIZE {
+        assert!(!s.hidden[j], "H{} should NOT fire when all sums are negative", j);
+    }
+}
+
+#[test]
+fn test_fire_wta_different_winners_for_different_inputs() {
+    let mut s = Spore::default_params();
+    s.base_noise = 0.0;
+    s.frustration = 0.0;
+
+    for j in 0..HIDDEN_SIZE {
+        for i in 0..INPUT_SIZE {
+            s.weights_ih[j][i] = 0.0;
+        }
+        s.bias_h[j] = 0.0;
+    }
+    s.weights_ih[0][0] = 10.0;
+    s.weights_ih[1][1] = 10.0;
+    s.bias_o = 100.0;
+
+    let mut inputs_a = [0.0; INPUT_SIZE];
+    inputs_a[0] = 1.0;
+    s.fire(&inputs_a);
+    assert!(s.hidden[0], "H0 should win when input[0]=1");
+    assert!(!s.hidden[1], "H1 should NOT win when input[0]=1");
+
+    s.traces_ih = [[0.0; INPUT_SIZE]; HIDDEN_SIZE];
+    s.traces_ho = [0.0; HIDDEN_SIZE];
+    s.trace_bias_h = [0.0; HIDDEN_SIZE];
+    s.trace_bias_o = 0.0;
+
+    let mut inputs_b = [0.0; INPUT_SIZE];
+    inputs_b[1] = 1.0;
+    s.fire(&inputs_b);
+    assert!(s.hidden[1], "H1 should win when input[1]=1");
+    assert!(!s.hidden[0], "H0 should NOT win when input[1]=1");
+}
+
+// =============================================================================
 // receive_reward()
 // =============================================================================
 
