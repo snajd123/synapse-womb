@@ -137,7 +137,7 @@ fn run_simulation(args: &[String]) {
         println!("========================================");
         println!("  SWARM V2 — MIRROR EXPERIMENT         ");
         println!("========================================");
-        println!(" {} Spores x (8->4->1) | Per-Bit Credit", swarm_size);
+        println!(" {} Spores x (8->4->1) | {} per bit | Consensus", swarm_size, swarm_size / 8);
         println!();
         println!("Configuration:");
         println!("  Swarm size:          {}", swarm_size);
@@ -170,12 +170,22 @@ fn run_simulation(args: &[String]) {
     println!("========================================");
     println!("FINAL RESULTS");
     println!("========================================");
-    println!("  Ticks run:      {}", sim.tick);
-    println!("  Swarm accuracy: {:.2}%", final_accuracy * 100.0);
-    println!("  Per-Spore:");
-    for (i, spore) in sim.swarm().spores.iter().enumerate() {
-        println!("    Spore {}: acc={:.1}% frust={:.3}",
-            i, spore.recent_accuracy * 100.0, spore.frustration);
+    println!("  Ticks run:         {}", sim.tick);
+    println!("  Consensus accuracy: {:.2}%", sim.swarm().accuracy() * 100.0);
+    println!("  Per-Bit Consensus (best Spore per bit):");
+    for k in 0..8 {
+        let mut assigned: Vec<(usize, f32)> = sim.swarm().spores.iter()
+            .enumerate()
+            .filter(|(i, _)| i % 8 == k)
+            .map(|(i, s)| (i, s.recent_accuracy))
+            .collect();
+        assigned.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let best = assigned[0];
+        let others: Vec<String> = assigned[1..].iter()
+            .map(|(i, a)| format!("S{}={:.0}%", i, a * 100.0))
+            .collect();
+        println!("    Bit {}: best=Spore {} ({:.1}%)  peers=[{}]",
+            k, best.0, best.1 * 100.0, others.join(", "));
     }
     println!();
 
