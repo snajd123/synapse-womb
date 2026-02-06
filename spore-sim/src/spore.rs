@@ -253,8 +253,12 @@ impl Spore {
 
     /// Apply Hebbian learning using signed dopamine and traces.
     ///
-    /// `weight += learning_rate * dopamine * trace`
-    /// `bias   += learning_rate * dopamine * trace_b`
+    /// Learning rate is gated by accuracy: `effective_lr = lr * (1 - recent_accuracy)`.
+    /// Converged Spores (high accuracy) learn slowly, preventing catastrophic forgetting.
+    /// Newborn Spores (accuracy=0) learn at full speed.
+    ///
+    /// `weight += effective_lr * dopamine * trace`
+    /// `bias   += effective_lr * dopamine * trace_b`
     ///
     /// Dopamine is consumed (set to 0) after learning.
     pub fn learn(&mut self) {
@@ -263,7 +267,7 @@ impl Spore {
         }
 
         let d = self.dopamine;
-        let lr = self.learning_rate;
+        let lr = self.learning_rate * (1.0 - self.recent_accuracy);
 
         // Update Input → Hidden weights and biases
         for j in 0..HIDDEN_SIZE {
