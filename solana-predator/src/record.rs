@@ -54,6 +54,27 @@ impl Record {
     }
 }
 
+// --- Orca Whirlpool price extraction ---
+
+/// Offset of sqrt_price (u128 LE) in Whirlpool account data (after 8-byte Anchor discriminator).
+const WHIRLPOOL_SQRT_PRICE_OFFSET: usize = 65;
+
+/// Extract price from Orca Whirlpool account data using sqrt_price field.
+/// sqrt_price is a Q64.64 fixed-point square root of the price.
+/// Formula: price = (sqrt_price / 2^64)^2 * 10^(coin_dec - pc_dec)
+pub fn whirlpool_price(data: &[u8; AMM_DATA_SIZE], coin_dec: u8, pc_dec: u8) -> f64 {
+    let end = WHIRLPOOL_SQRT_PRICE_OFFSET + 16;
+    if data.len() < end { return 0.0; }
+    let sqrt_price = u128::from_le_bytes(
+        data[WHIRLPOOL_SQRT_PRICE_OFFSET..end].try_into().unwrap()
+    );
+    if sqrt_price == 0 { return 0.0; }
+    let sqrt_f = sqrt_price as f64 / (1u128 << 64) as f64;
+    let raw_price = sqrt_f * sqrt_f;
+    let decimal_adj = 10f64.powi(coin_dec as i32 - pc_dec as i32);
+    raw_price * decimal_adj
+}
+
 // --- DualRecord: Raydium + Orca in a single record ---
 
 pub const DUAL_RECORD_SIZE: usize = 8 + AMM_DATA_SIZE + 8 + 8 + AMM_DATA_SIZE + 8 + 8; // 2088
@@ -114,7 +135,7 @@ impl DualRecord {
     }
 
     pub fn orca_price(&self, coin_dec: u8, pc_dec: u8) -> f64 {
-        self.orca_record().price(coin_dec, pc_dec)
+        whirlpool_price(&self.orca_data, coin_dec, pc_dec)
     }
 }
 

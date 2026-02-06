@@ -396,7 +396,7 @@ fn main() -> Result<()> {
         eprintln!("  Feature mode: COMPUTED ({} features per record)", NUM_FEATURES);
         records.iter().enumerate().map(|(i, r)| {
             let prev = if i > 0 { Some(&records[i - 1]) } else { None };
-            compute_features(r, prev, args.coin_decimals, args.pc_decimals)
+            compute_features(r, prev, args.coin_decimals, args.pc_decimals, None)
         }).collect()
     } else {
         eprintln!("  Feature mode: RAW ({} amm_data bytes)", AMM_DATA_SIZE);

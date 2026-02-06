@@ -3,7 +3,7 @@
 //! Each feature produces a single u8 that a Spore reads via byte_to_inputs().
 //! Features are computed from a current Record and optionally a previous Record.
 
-use crate::record::Record;
+use crate::record::{Record, whirlpool_price};
 
 /// Feature names (for logging). Index matches position in compute_features() output.
 pub const FEATURE_NAMES: &[&str] = &[
@@ -64,15 +64,34 @@ fn price_to_byte(price: f64, low: f64, high: f64) -> u8 {
     (normalized * 255.0).clamp(0.0, 255.0) as u8
 }
 
+/// Price function type: extracts price from a Record's amm_data.
+/// Used to inject Whirlpool sqrt_price for Orca instead of vault ratio.
+pub type PriceFn = fn(&[u8; 1024], u8, u8) -> f64;
+
+/// Default price function: vault ratio (correct for Raydium constant-product AMM).
+fn vault_ratio_price(r: &Record, coin_dec: u8, pc_dec: u8) -> f64 {
+    r.price(coin_dec, pc_dec)
+}
+
 /// Compute feature buffer from current record and optional previous record.
 /// Returns exactly NUM_FEATURES bytes.
+/// `price_fn` allows injecting a price source (e.g. `whirlpool_price` for Orca).
+/// When None, uses vault ratio (correct for Raydium constant-product AMM).
 pub fn compute_features(
     current: &Record,
     prev: Option<&Record>,
     coin_dec: u8,
     pc_dec: u8,
+    price_fn: Option<PriceFn>,
 ) -> Vec<u8> {
     let mut f = Vec::with_capacity(NUM_FEATURES);
+
+    let get_price = |r: &Record| -> f64 {
+        match price_fn {
+            Some(pf) => pf(&r.amm_data, coin_dec, pc_dec),
+            None => vault_ratio_price(r, coin_dec, pc_dec),
+        }
+    };
 
     // [0-7] Vault balance bytes: coin_amount LE
     f.extend_from_slice(&current.coin_amount.to_le_bytes());
@@ -80,14 +99,14 @@ pub fn compute_features(
     f.extend_from_slice(&current.pc_amount.to_le_bytes());
 
     // [16] Price byte
-    let price = current.price(coin_dec, pc_dec);
+    let price = get_price(current);
     f.push(price_to_byte(price, 50.0, 200.0));
 
     // [17-19] Delta features
     if let Some(prev) = prev {
         let coin_delta = current.coin_amount as i64 - prev.coin_amount as i64;
         let pc_delta = current.pc_amount as i64 - prev.pc_amount as i64;
-        let price_prev = prev.price(coin_dec, pc_dec);
+        let price_prev = get_price(prev);
         let price_delta = ((price - price_prev) * 10000.0) as i64;
         f.push(delta_to_byte(coin_delta, 10_000_000));  // ±128 covers ±1.28 SOL
         f.push(delta_to_byte(pc_delta, 100_000));        // ±128 covers ±$12.80
@@ -149,22 +168,24 @@ pub fn compute_dual_features(
 ) -> Vec<u8> {
     let mut f = Vec::with_capacity(NUM_DUAL_FEATURES);
 
-    // [0-21] Raydium single-pool features
-    f.extend_from_slice(&compute_features(ray, ray_prev, coin_dec, pc_dec));
-    // [22-43] Orca single-pool features
-    f.extend_from_slice(&compute_features(orca, orca_prev, coin_dec, pc_dec));
+    // [0-21] Raydium single-pool features (vault ratio price — correct for constant-product AMM)
+    f.extend_from_slice(&compute_features(ray, ray_prev, coin_dec, pc_dec, None));
+    // [22-43] Orca single-pool features (whirlpool sqrt_price — correct for concentrated liquidity)
+    f.extend_from_slice(&compute_features(orca, orca_prev, coin_dec, pc_dec, Some(whirlpool_price)));
 
     // Cross-pool features
     let ray_price = ray.price(coin_dec, pc_dec);
-    let orca_price = orca.price(coin_dec, pc_dec);
-    let spread = (ray_price - orca_price).abs();
+    let orca_price_val = whirlpool_price(&orca.amm_data, coin_dec, pc_dec);
+    let spread = (ray_price - orca_price_val).abs();
 
     // [44] Spread: absolute price difference
     f.push(spread_to_byte(spread));
 
     // [45] Spread delta: change in spread vs previous
     if let (Some(rp), Some(op)) = (ray_prev, orca_prev) {
-        let prev_spread = (rp.price(coin_dec, pc_dec) - op.price(coin_dec, pc_dec)).abs();
+        let prev_ray_price = rp.price(coin_dec, pc_dec);
+        let prev_orca_price = whirlpool_price(&op.amm_data, coin_dec, pc_dec);
+        let prev_spread = (prev_ray_price - prev_orca_price).abs();
         let spread_change = ((spread - prev_spread) * 10000.0) as i64;
         f.push(delta_to_byte(spread_change, 1));
     } else {
@@ -172,11 +193,11 @@ pub fn compute_dual_features(
     }
 
     // [46] Price ratio: ray/orca encoded around 128
-    f.push(ratio_to_byte(ray_price, orca_price));
+    f.push(ratio_to_byte(ray_price, orca_price_val));
 
     // [47] Ray premium: directional (ray > orca → >128)
-    let premium = if orca_price > 0.0 {
-        ((ray_price - orca_price) / orca_price * 1000.0).clamp(-128.0, 127.0) + 128.0
+    let premium = if orca_price_val > 0.0 {
+        ((ray_price - orca_price_val) / orca_price_val * 1000.0).clamp(-128.0, 127.0) + 128.0
     } else {
         128.0
     };
@@ -191,7 +212,9 @@ pub fn compute_dual_features(
     // [49] Spread acceleration (second derivative)
     // Requires two previous records; without them, neutral
     if let (Some(rp), Some(op)) = (ray_prev, orca_prev) {
-        let prev_spread = (rp.price(coin_dec, pc_dec) - op.price(coin_dec, pc_dec)).abs();
+        let prev_ray_p = rp.price(coin_dec, pc_dec);
+        let prev_orca_p = whirlpool_price(&op.amm_data, coin_dec, pc_dec);
+        let prev_spread = (prev_ray_p - prev_orca_p).abs();
         let spread_delta = spread - prev_spread;
         // We don't have prev-prev, so use spread_delta sign as proxy
         let accel = (spread_delta * 100000.0) as i64;
@@ -211,6 +234,19 @@ mod tests {
 
     fn make_record(coin: u64, pc: u64) -> Record {
         Record { slot: 1, amm_data: [0u8; 1024], coin_amount: coin, pc_amount: pc }
+    }
+
+    /// Make an Orca-style Record with sqrt_price embedded at offset 65.
+    /// `target_price` is in USD (e.g. 87.0 for SOL/USDC).
+    fn make_orca_record(coin: u64, pc: u64, target_price: f64) -> Record {
+        // price = (sqrt_price / 2^64)^2 * 10^(coin_dec - pc_dec)
+        // For coin_dec=9, pc_dec=6: decimal_adj = 1000
+        // sqrt_price = 2^64 * sqrt(target_price / 1000)
+        let sqrt_val = (target_price / 1000.0).sqrt();
+        let sqrt_price = (sqrt_val * (1u128 << 64) as f64) as u128;
+        let mut amm_data = [0u8; 1024];
+        amm_data[65..81].copy_from_slice(&sqrt_price.to_le_bytes());
+        Record { slot: 1, amm_data, coin_amount: coin, pc_amount: pc }
     }
 
     // --- delta_to_byte tests ---
@@ -286,20 +322,20 @@ mod tests {
     #[test]
     fn test_feature_count() {
         let r = make_record(1_000_000_000, 87_000_000);
-        assert_eq!(compute_features(&r, None, 9, 6).len(), NUM_FEATURES);
+        assert_eq!(compute_features(&r, None, 9, 6, None).len(), NUM_FEATURES);
     }
 
     #[test]
     fn test_feature_count_with_prev() {
         let r1 = make_record(1_000_000_000, 87_000_000);
         let r2 = make_record(1_100_000_000, 88_000_000);
-        assert_eq!(compute_features(&r2, Some(&r1), 9, 6).len(), NUM_FEATURES);
+        assert_eq!(compute_features(&r2, Some(&r1), 9, 6, None).len(), NUM_FEATURES);
     }
 
     #[test]
     fn test_vault_bytes_are_le() {
         let r = make_record(0x0102030405060708, 0x1112131415161718);
-        let f = compute_features(&r, None, 9, 6);
+        let f = compute_features(&r, None, 9, 6, None);
         assert_eq!(f[0], 0x08);
         assert_eq!(f[7], 0x01);
         assert_eq!(f[8], 0x18);
@@ -309,7 +345,7 @@ mod tests {
     #[test]
     fn test_delta_neutral_without_prev() {
         let r = make_record(100, 200);
-        let f = compute_features(&r, None, 9, 6);
+        let f = compute_features(&r, None, 9, 6, None);
         assert_eq!(f[17], 128);
         assert_eq!(f[18], 128);
         assert_eq!(f[19], 128);
@@ -318,7 +354,7 @@ mod tests {
     #[test]
     fn test_volume_zero_without_prev() {
         let r = make_record(100, 200);
-        let f = compute_features(&r, None, 9, 6);
+        let f = compute_features(&r, None, 9, 6, None);
         assert_eq!(f[20], 0);
     }
 
@@ -329,14 +365,14 @@ mod tests {
         r2.amm_data[0] = 0xFF;
         r2.amm_data[10] = 0xAA;
         r2.amm_data[999] = 0x01;
-        let f = compute_features(&r2, Some(&r1), 9, 6);
+        let f = compute_features(&r2, Some(&r1), 9, 6, None);
         assert_eq!(f[21], 3);
     }
 
     #[test]
     fn test_activity_zero_without_prev() {
         let r = make_record(100, 200);
-        let f = compute_features(&r, None, 9, 6);
+        let f = compute_features(&r, None, 9, 6, None);
         assert_eq!(f[21], 0);
     }
 
@@ -405,7 +441,7 @@ mod tests {
         let ray = make_record(1_000_000_000, 87_000_000);
         let orca = make_record(500_000_000, 43_500_000);
         let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
-        let ray_only = compute_features(&ray, None, 9, 6);
+        let ray_only = compute_features(&ray, None, 9, 6, None);
         // First NUM_FEATURES bytes of dual should equal ray-only features
         assert_eq!(&dual[..NUM_FEATURES], &ray_only[..]);
     }
@@ -415,16 +451,16 @@ mod tests {
         let ray = make_record(1_000_000_000, 87_000_000);
         let orca = make_record(500_000_000, 43_500_000);
         let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
-        let orca_only = compute_features(&orca, None, 9, 6);
+        let orca_only = compute_features(&orca, None, 9, 6, Some(whirlpool_price));
         // Bytes [22..44] should equal orca-only features
         assert_eq!(&dual[NUM_FEATURES..NUM_FEATURES * 2], &orca_only[..]);
     }
 
     #[test]
     fn test_dual_spread_zero_same_price() {
-        // Same vault ratios → same price → spread = 0
+        // Raydium: vault ratio gives 87.0. Orca: sqrt_price set to give 87.0.
         let ray = make_record(1_000_000_000, 87_000_000);
-        let orca = make_record(1_000_000_000, 87_000_000);
+        let orca = make_orca_record(1_000_000_000, 87_000_000, 87.0);
         let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
         assert_eq!(dual[44], 0); // spread = 0
     }
@@ -432,7 +468,7 @@ mod tests {
     #[test]
     fn test_dual_ratio_same_price() {
         let ray = make_record(1_000_000_000, 87_000_000);
-        let orca = make_record(1_000_000_000, 87_000_000);
+        let orca = make_orca_record(1_000_000_000, 87_000_000, 87.0);
         let dual = compute_dual_features(&ray, None, &orca, None, 9, 6);
         assert_eq!(dual[46], 128); // ratio = 1.0 → midpoint
     }

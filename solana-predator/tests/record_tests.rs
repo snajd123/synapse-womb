@@ -1,6 +1,7 @@
 use solana_predator::record::{
     Record, RECORD_SIZE, AMM_DATA_SIZE, write_record, read_record,
     DualRecord, DUAL_RECORD_SIZE, write_dual_record, read_dual_record,
+    whirlpool_price,
 };
 
 #[test]
@@ -163,4 +164,57 @@ fn test_dual_record_read_write() {
     let dr2 = read_dual_record(&mut cursor).unwrap().unwrap();
     assert_eq!(dr2.slot, 77);
     assert_eq!(dr2.orca_coin, 700);
+}
+
+// --- whirlpool_price tests ---
+
+#[test]
+fn test_whirlpool_price_known_value() {
+    // sqrt_price = 5_486_883_951_028_905_093 (real value from live Orca pool)
+    // Expected price ≈ $88.47 for SOL/USDC (coin_dec=9, pc_dec=6)
+    let sqrt_price: u128 = 5_486_883_951_028_905_093;
+    let mut data = [0u8; AMM_DATA_SIZE];
+    data[65..81].copy_from_slice(&sqrt_price.to_le_bytes());
+    let price = whirlpool_price(&data, 9, 6);
+    assert!((price - 88.47).abs() < 0.5, "expected ~88.47, got {}", price);
+}
+
+#[test]
+fn test_whirlpool_price_zero_sqrt() {
+    let data = [0u8; AMM_DATA_SIZE];
+    assert_eq!(whirlpool_price(&data, 9, 6), 0.0);
+}
+
+#[test]
+fn test_whirlpool_price_decimal_adjustment() {
+    // With same decimals (coin_dec == pc_dec), decimal_adj = 1.0
+    let sqrt_price: u128 = 1u128 << 64; // sqrt_price = 2^64 → raw_price = 1.0
+    let mut data = [0u8; AMM_DATA_SIZE];
+    data[65..81].copy_from_slice(&sqrt_price.to_le_bytes());
+    let price = whirlpool_price(&data, 6, 6);
+    assert!((price - 1.0).abs() < 0.001, "expected ~1.0, got {}", price);
+}
+
+#[test]
+fn test_dual_record_orca_price_uses_whirlpool() {
+    // Verify DualRecord::orca_price uses whirlpool sqrt_price, not vault ratio
+    let sqrt_price: u128 = 5_486_883_951_028_905_093;
+    let mut orca_data = [0u8; AMM_DATA_SIZE];
+    orca_data[65..81].copy_from_slice(&sqrt_price.to_le_bytes());
+    let dr = DualRecord {
+        slot: 1,
+        ray_amm_data: [0u8; AMM_DATA_SIZE],
+        ray_coin: 1_000_000_000,
+        ray_pc: 87_000_000,
+        orca_data,
+        orca_coin: 999_999, // vault ratio would give ~0.000999 — clearly wrong
+        orca_pc: 1,
+    };
+    let orca_p = dr.orca_price(9, 6);
+    // Should be ~88.47 from sqrt_price, NOT vault ratio
+    assert!(orca_p > 50.0, "orca_price should use whirlpool sqrt_price, got {}", orca_p);
+    assert!((orca_p - 88.47).abs() < 0.5, "expected ~88.47, got {}", orca_p);
+    // Raydium should still use vault ratio
+    let ray_p = dr.ray_price(9, 6);
+    assert!((ray_p - 87.0).abs() < 0.1, "ray_price should use vault ratio, got {}", ray_p);
 }
