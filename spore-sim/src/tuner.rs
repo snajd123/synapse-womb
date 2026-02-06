@@ -8,6 +8,7 @@
 //! - Final Exam on top candidates (full marathon, 3 runs)
 
 use rand::Rng;
+use rayon::prelude::*;
 use serde::{Serialize, Deserialize};
 
 use crate::simulation::Simulation;
@@ -117,6 +118,152 @@ pub struct EvalResult {
 
     /// Whether the genome achieved stable convergence
     pub stable: bool,
+}
+
+/// Configuration for the genetic tuner.
+pub struct TunerConfig {
+    /// Number of genomes per generation
+    pub population_size: usize,
+
+    /// Number of evolution generations
+    pub generations: usize,
+
+    /// Number of elite genomes to preserve (cached, not re-evaluated)
+    pub elite_count: usize,
+
+    /// Simulation ticks per evaluation
+    pub ticks_per_eval: u64,
+
+    /// Number of finalists for the Final Exam
+    pub finalist_count: usize,
+}
+
+impl Default for TunerConfig {
+    fn default() -> Self {
+        Self {
+            population_size: 50,
+            generations: 20,
+            elite_count: 10,
+            ticks_per_eval: 20_000,
+            finalist_count: 15,
+        }
+    }
+}
+
+/// Run the genetic hyperparameter tuner.
+///
+/// Returns the best genome and its evaluation result.
+///
+/// Algorithm:
+/// 1. Generate random initial population
+/// 2. For each generation:
+///    a. Evaluate all new genomes in parallel (rayon)
+///    b. Merge with cached elite scores
+///    c. Select top N as new elites
+///    d. Breed next generation: crossover + mutation + diversity injection
+/// 3. Final Exam: top candidates run full marathon (no early exit)
+pub fn tune(config: &TunerConfig) -> (Genome, EvalResult) {
+    let mut rng = rand::thread_rng();
+
+    // Initial population: all random
+    let mut population: Vec<Genome> = (0..config.population_size)
+        .map(|_| Genome::random())
+        .collect();
+
+    // Elite cache: (genome, score) - NOT re-evaluated each generation
+    let mut elite_cache: Vec<(Genome, EvalResult)> = Vec::new();
+
+    let mut best_score: f32 = f32::NEG_INFINITY;
+    let mut gens_without_improvement: usize = 0;
+
+    for gen in 0..config.generations {
+        // PARALLEL: Evaluate all new genomes
+        let new_scored: Vec<(Genome, EvalResult)> = population
+            .par_iter()
+            .map(|g| (g.clone(), evaluate_fast(g, config.ticks_per_eval)))
+            .collect();
+
+        // Merge with cached elites
+        let mut all_scored: Vec<(Genome, EvalResult)> = elite_cache.clone();
+        all_scored.extend(new_scored);
+
+        // Safe sort (handles NaN)
+        all_scored.sort_by(|a, b| b.1.score.total_cmp(&a.1.score));
+
+        // Truncate to reasonable size
+        all_scored.truncate(config.population_size + config.elite_count);
+
+        let gen_best = all_scored[0].1.score;
+
+        // Adaptive mutation tracking
+        if gen_best > best_score {
+            best_score = gen_best;
+            gens_without_improvement = 0;
+        } else {
+            gens_without_improvement += 1;
+        }
+        let magnitude_mult = if gens_without_improvement >= 3 { 2.0 } else { 1.0 };
+
+        // Progress report (after collect, not during parallel work)
+        let stable_count = all_scored.iter().filter(|s| s.1.stable).count();
+        let eval_count = all_scored.len().min(config.population_size);
+        let avg_score: f32 = all_scored.iter().take(eval_count)
+            .map(|s| s.1.score).sum::<f32>() / eval_count as f32;
+        eprintln!("Gen {:2}: best={:.1} avg={:.1} stable={}/{}{}",
+            gen, gen_best, avg_score, stable_count, eval_count,
+            if magnitude_mult > 1.0 { " [BOOST]" } else { "" });
+
+        // Update elite cache (top N with their known scores)
+        elite_cache = all_scored[0..config.elite_count.min(all_scored.len())].to_vec();
+
+        // BREED next generation: only new children (elites cached separately)
+        let elites: Vec<&Genome> = elite_cache.iter().map(|(g, _)| g).collect();
+        let diversity_count = config.population_size / 5;  // 20% fresh randoms
+        let children_count = config.population_size - diversity_count;
+
+        population = Vec::with_capacity(config.population_size);
+
+        // Children from crossover + mutation
+        for _ in 0..children_count {
+            let parent_a = &elites[rng.gen_range(0..elites.len())];
+            let parent_b = &elites[rng.gen_range(0..elites.len())];
+            let mut child = Genome::crossover(parent_a, parent_b);
+            child.mutate(magnitude_mult);
+            population.push(child);
+        }
+
+        // Diversity injection: fresh randoms
+        for _ in 0..diversity_count {
+            population.push(Genome::random());
+        }
+    }
+
+    // FINAL EXAM: Top candidates run full marathon (no early exit)
+    let finalist_count = config.finalist_count.min(elite_cache.len());
+    eprintln!("\n=== FINAL EXAM (Top {}, Full Marathon, 3 Runs) ===", finalist_count);
+
+    let finalist_genomes: Vec<Genome> = elite_cache[0..finalist_count]
+        .iter()
+        .map(|(g, _)| g.clone())
+        .collect();
+
+    let finalists: Vec<(Genome, EvalResult)> = finalist_genomes
+        .par_iter()
+        .map(|g| (g.clone(), evaluate_full(g, config.ticks_per_eval)))
+        .collect();
+
+    // Print results AFTER parallel work (no race condition)
+    for (i, (genome, result)) in finalists.iter().enumerate() {
+        eprintln!("  #{:2}: score={:.1} acc={:.2}% stable={} conv@{:?} lr={:.3} td={:.4}",
+            i + 1, result.score, result.final_accuracy * 100.0,
+            result.stable, result.convergence_tick,
+            genome.learning_rate, genome.trace_decay);
+    }
+
+    finalists
+        .into_iter()
+        .max_by(|a, b| a.1.score.total_cmp(&b.1.score))
+        .unwrap()
 }
 
 /// Fast evaluation for use during evolution loop.

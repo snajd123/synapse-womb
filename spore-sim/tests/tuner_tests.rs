@@ -1,4 +1,4 @@
-use spore_sim::tuner::{Genome, EvalResult, evaluate_fast, evaluate_full};
+use spore_sim::tuner::{Genome, EvalResult, TunerConfig, evaluate_fast, evaluate_full};
 
 #[test]
 fn test_genome_random_in_range() {
@@ -161,4 +161,29 @@ fn test_evaluate_fast_different_runs_may_differ() {
     // Both should be valid, may differ due to different random sequences
     assert!(r1.score.is_finite());
     assert!(r2.score.is_finite());
+}
+
+#[test]
+fn test_tuner_config_default() {
+    let config = TunerConfig::default();
+    assert_eq!(config.population_size, 50);
+    assert_eq!(config.generations, 20);
+    assert_eq!(config.elite_count, 10);
+    assert_eq!(config.ticks_per_eval, 20_000);
+}
+
+#[test]
+fn test_tune_tiny_run() {
+    // Minimal tuner run to verify it doesn't crash
+    let config = TunerConfig {
+        population_size: 6,
+        generations: 2,
+        elite_count: 2,
+        ticks_per_eval: 500,
+        finalist_count: 2,
+    };
+    let (best_genome, best_result) = spore_sim::tuner::tune(&config);
+    assert!(best_result.score.is_finite());
+    assert!(best_genome.learning_rate >= 0.05 && best_genome.learning_rate <= 0.5);
+    assert!(best_genome.trace_decay >= 0.85 && best_genome.trace_decay <= 0.999);
 }
