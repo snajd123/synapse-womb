@@ -10,6 +10,7 @@
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use rand::Rng;
+use solana_predator::features::{compute_features, NUM_FEATURES, FEATURE_NAMES};
 use solana_predator::record::{read_record, Record, AMM_DATA_SIZE};
 use spore_sim::constants::*;
 use spore_sim::swarm::Swarm;
@@ -54,6 +55,10 @@ struct Args {
     /// Force Spore 0 to this byte offset (for testing known signals). -1 = disabled.
     #[arg(long, default_value = "-1")]
     force_offset: i32,
+
+    /// Feature mode: "raw" (scan amm_data bytes) or "features" (computed features)
+    #[arg(long, default_value = "features")]
+    feature_mode: String,
 }
 
 /// Convert a single byte to 16 f32 inputs: 8 positive + 8 complementary.
@@ -138,10 +143,24 @@ fn main() -> Result<()> {
     eprintln!("  Target balance: {:.1}% up", 100.0 * ups as f64 / n_samples as f64);
     eprintln!();
 
+    // Feature mode: precompute feature buffers or use raw amm_data bytes
+    let use_features = args.feature_mode == "features";
+    let feature_buffers: Vec<Vec<u8>> = if use_features {
+        eprintln!("  Feature mode: COMPUTED ({} features per record)", NUM_FEATURES);
+        records.iter().enumerate().map(|(i, r)| {
+            let prev = if i > 0 { Some(&records[i - 1]) } else { None };
+            compute_features(r, prev, args.coin_decimals, args.pc_decimals)
+        }).collect()
+    } else {
+        eprintln!("  Feature mode: RAW ({} amm_data bytes)", AMM_DATA_SIZE);
+        Vec::new()
+    };
+    let feature_space = if use_features { NUM_FEATURES } else { AMM_DATA_SIZE };
+
     // Assign random byte offsets to each Spore
     let mut rng = rand::thread_rng();
     let mut offsets: Vec<usize> = (0..args.spores)
-        .map(|_| rng.gen_range(0..AMM_DATA_SIZE))
+        .map(|_| rng.gen_range(0..feature_space))
         .collect();
     if args.force_offset >= 0 {
         offsets[0] = args.force_offset as usize;
@@ -167,7 +186,11 @@ fn main() -> Result<()> {
     );
 
     eprintln!("  Swarm initialized: {} Spores", swarm.size());
-    eprintln!("  Byte offsets assigned (random, 0-1023)");
+    if use_features {
+        eprintln!("  Feature offsets assigned (random, 0-{})", feature_space - 1);
+    } else {
+        eprintln!("  Byte offsets assigned (random, 0-1023)");
+    }
     eprintln!();
 
     // First-tick accuracy tracking (per-Spore: correct on first tick of each record)
@@ -190,7 +213,11 @@ fn main() -> Result<()> {
             // directional weight changes. Analogous to mini-batch SGD.
             for hold in 0..args.input_hold {
                 for (i, spore) in swarm.spores.iter_mut().enumerate() {
-                    let byte = records[t].amm_data[offsets[i]];
+                    let byte = if use_features {
+                        feature_buffers[t][offsets[i]]
+                    } else {
+                        records[t].amm_data[offsets[i]]
+                    };
                     let inputs = byte_to_inputs(byte);
                     spore.fire(&inputs);
                     let correct = spore.output == target;
@@ -258,8 +285,14 @@ fn main() -> Result<()> {
                 "chance"
             };
             eprintln!(
-                "    Spore {:>3} | byte {:>4} | acc: {:.4} | {}",
-                idx, offsets[idx], acc, label
+                "    Spore {:>3} | {:>12} | acc: {:.4} | {}",
+                idx,
+                if use_features && offsets[idx] < FEATURE_NAMES.len() {
+                    FEATURE_NAMES[offsets[idx]].to_string()
+                } else {
+                    format!("byte {:>4}", offsets[idx])
+                },
+                acc, label
             );
         }
         eprintln!();
@@ -299,8 +332,14 @@ fn main() -> Result<()> {
             "noise"
         };
         eprintln!(
-            "    Spore {:>3} | byte {:>4} | 1st-tick: {:.4} | ema: {:.4} | {}",
-            idx, offset, ft_acc, ema, label
+            "    Spore {:>3} | {:>12} | 1st-tick: {:.4} | ema: {:.4} | {}",
+            idx,
+            if use_features && offset < FEATURE_NAMES.len() {
+                FEATURE_NAMES[offset].to_string()
+            } else {
+                format!("byte {:>4}", offset)
+            },
+            ft_acc, ema, label
         );
     }
     eprintln!();
@@ -308,8 +347,14 @@ fn main() -> Result<()> {
     eprintln!("  Bottom 5:");
     for &(idx, offset, ft_acc, ema) in ranked.iter().rev().take(5) {
         eprintln!(
-            "    Spore {:>3} | byte {:>4} | 1st-tick: {:.4} | ema: {:.4}",
-            idx, offset, ft_acc, ema
+            "    Spore {:>3} | {:>12} | 1st-tick: {:.4} | ema: {:.4}",
+            idx,
+            if use_features && offset < FEATURE_NAMES.len() {
+                FEATURE_NAMES[offset].to_string()
+            } else {
+                format!("byte {:>4}", offset)
+            },
+            ft_acc, ema
         );
     }
     eprintln!("========================================");
