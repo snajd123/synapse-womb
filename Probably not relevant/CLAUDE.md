@@ -27,7 +27,7 @@ When using the `superpowers:requesting-code-review` skill, the code review agent
 - **Accuracy-Gated Learning Rate**: `effective_lr = lr * (1 - recent_accuracy)`. Converged Spores learn slowly; newborn Spores learn at full speed. Prevents catastrophic forgetting.
 - **Hidden bias decayed, output bias NOT**: Hidden biases decay alongside weights (*=0.99 every weight_decay_interval ticks) to prevent runaway from positive reward drift. Output bias is controlled by homeostasis instead.
 - **Positive initial bias (INITIAL_BIAS = 0.5)**: Prevents "Initial Blackout" — neurons must fire from tick 1 so traces exist for learning. Without this, unlucky random weights → never fires → no traces → learn() does `weight += LR * reward * 0.0` forever.
-- **Target Activity Homeostasis**: `firing_rate` EMA tracks output activity; `maintain()` nudges `bias_o` toward `target_rate` (10%). Silent → bias up. Overactive → bias down. No Spore can stay dead.
+- **Target Activity Homeostasis**: `firing_rate` EMA tracks output activity; `maintain()` nudges `bias_o` toward `target_rate` (50%). Silent → bias up. Overactive → bias down. Target rate MUST match the task's expected firing rate (50% for mirror task). At 10%, homeostasis fights correct convergence and causes anti-correlation death spirals.
 - **Winner-Take-All hidden layer**: Only the hidden neuron with the highest sum fires via threshold. Suppressed neurons can fire via noise (exploration). Prevents hidden neuron homogeneity — forces specialization.
 - **Hard threshold everywhere**: Hidden and output neurons use `sum + bias > 0.0`. No sigmoid.
 - **Spore isolation**: Spores do not share weights, traces, or state. Per-bit credit ensures zero interference.
