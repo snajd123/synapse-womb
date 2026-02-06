@@ -273,6 +273,49 @@ fn test_learn_no_change_with_zero_trace() {
     assert_eq!(s.weights_ih[0][0], original);
 }
 
+#[test]
+fn test_learn_gated_by_high_accuracy() {
+    let mut s = Spore::default_params();
+    s.weights_ih[0][0] = 0.0;
+    s.traces_ih[0][0] = 1.0;
+    s.dopamine = 1.0;
+    s.recent_accuracy = 0.9;
+    s.learn();
+    // effective_lr = 0.1 * (1.0 - 0.9) = 0.01
+    // weight change = 0.01 * 1.0 * 1.0 = 0.01
+    assert!((s.weights_ih[0][0] - 0.01).abs() < 0.001,
+        "At 90% accuracy, weight change should be ~0.01, got {}", s.weights_ih[0][0]);
+}
+
+#[test]
+fn test_learn_ungated_at_zero_accuracy() {
+    let mut s = Spore::default_params();
+    s.weights_ih[0][0] = 0.0;
+    s.traces_ih[0][0] = 1.0;
+    s.dopamine = 1.0;
+    s.recent_accuracy = 0.0;
+    s.learn();
+    // effective_lr = 0.1 * (1.0 - 0.0) = 0.1
+    // weight change = 0.1 * 1.0 * 1.0 = 0.1
+    assert!((s.weights_ih[0][0] - 0.1).abs() < 0.001,
+        "At 0% accuracy, weight change should be ~0.1, got {}", s.weights_ih[0][0]);
+}
+
+#[test]
+fn test_learn_cortisol_barely_moves_converged_spore() {
+    let mut s = Spore::default_params();
+    s.weights_ih[0][0] = 1.0;
+    s.traces_ih[0][0] = 1.0;
+    s.dopamine = -DEFAULT_CORTISOL_STRENGTH; // cortisol
+    s.recent_accuracy = 0.95;
+    s.learn();
+    // effective_lr = 0.1 * (1.0 - 0.95) = 0.005
+    // weight change = 0.005 * -0.3 * 1.0 = -0.0015
+    // new weight = 1.0 - 0.0015 = 0.9985
+    assert!(s.weights_ih[0][0] > 0.99,
+        "Converged Spore should barely lose weight from cortisol, got {}", s.weights_ih[0][0]);
+}
+
 // =============================================================================
 // maintain()
 // =============================================================================
