@@ -35,19 +35,23 @@ impl Environment {
         self.current_input
     }
 
-    /// Get the current input as an f32 array (one element per bit).
-    /// Bit 0 = index 0, Bit 7 = index 7.
+    /// Get the current input as an f32 array with complementary encoding.
+    /// Indices 0-7: positive bits (bit i of byte).
+    /// Indices 8-15: complementary bits (1.0 - bit i).
     pub fn get_input_f32(&self) -> [f32; INPUT_SIZE] {
         let mut inputs = [0.0_f32; INPUT_SIZE];
-        for i in 0..INPUT_SIZE {
-            inputs[i] = ((self.current_input >> i) & 1) as f32;
+        for i in 0..8 {
+            let val = ((self.current_input >> i) & 1) as f32;
+            inputs[i] = val;
+            inputs[i + 8] = 1.0 - val;
         }
         inputs
     }
 
     /// Get the target bits for the mirror task (target = input).
+    /// Returns 8 bits (one per bit of the byte), NOT 16.
     pub fn get_target_bits(&self) -> Vec<bool> {
-        (0..INPUT_SIZE)
+        (0..8)
             .map(|i| (self.current_input >> i) & 1 == 1)
             .collect()
     }

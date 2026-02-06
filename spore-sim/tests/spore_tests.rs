@@ -59,7 +59,8 @@ fn test_spore_custom_params() {
 #[test]
 fn test_fire_returns_bool() {
     let mut s = Spore::default_params();
-    let inputs = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+    let inputs = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                   0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
     let output = s.fire(&inputs);
     let _ = output;
 }

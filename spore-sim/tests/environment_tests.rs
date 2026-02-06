@@ -27,9 +27,15 @@ fn test_get_input_f32_matches_u8() {
     let byte = env.get_input();
     let f32s = env.get_input_f32();
 
-    for i in 0..INPUT_SIZE {
+    // Positive channels (0-7)
+    for i in 0..8 {
         let expected = ((byte >> i) & 1) as f32;
-        assert_eq!(f32s[i], expected, "Bit {} mismatch", i);
+        assert_eq!(f32s[i], expected, "Positive bit {} mismatch", i);
+    }
+    // Complementary channels (8-15)
+    for i in 0..8 {
+        let expected = 1.0 - ((byte >> i) & 1) as f32;
+        assert_eq!(f32s[i + 8], expected, "Complementary bit {} mismatch", i);
     }
 }
 
@@ -39,8 +45,8 @@ fn test_get_target_bits_mirrors_input() {
     let byte = env.get_input();
     let targets = env.get_target_bits();
 
-    assert_eq!(targets.len(), INPUT_SIZE);
-    for i in 0..INPUT_SIZE {
+    assert_eq!(targets.len(), 8);
+    for i in 0..8 {
         let expected = (byte >> i) & 1 == 1;
         assert_eq!(targets[i], expected, "Target bit {} mismatch", i);
     }

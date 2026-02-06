@@ -19,7 +19,8 @@ fn test_swarm_different_sizes() {
 #[test]
 fn test_swarm_tick_returns_valid_accuracy() {
     let mut swarm = Swarm::new(32, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
-    let inputs = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0];
+    let inputs = [1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0,
+                   0.0, 1.0, 0.0, 1.0, 0.0, 1.0, 0.0, 1.0];
     let targets = vec![true, false, true, false, true, false, true, false];
     let accuracy = swarm.tick(&inputs, &targets, 0);
     assert!(accuracy >= 0.0 && accuracy <= 1.0, "Accuracy {} out of range", accuracy);

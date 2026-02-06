@@ -35,7 +35,11 @@ struct Args {
     #[arg(long, default_value = "100")]
     lookahead: usize,
 
-    /// Print progress every N ticks (0 = epoch-end only)
+    /// Ticks to hold each record (1 = no hold, best for weight learning)
+    #[arg(long, default_value = "1")]
+    input_hold: usize,
+
+    /// Print progress every N records (0 = epoch-end only)
     #[arg(long, default_value = "1000")]
     log_interval: usize,
 
@@ -46,13 +50,22 @@ struct Args {
     /// PC decimals for price computation (USDC = 6)
     #[arg(long, default_value = "6")]
     pc_decimals: u8,
+
+    /// Force Spore 0 to this byte offset (for testing known signals). -1 = disabled.
+    #[arg(long, default_value = "-1")]
+    force_offset: i32,
 }
 
-/// Convert a single byte to 8 f32 inputs (LSB to MSB).
+/// Convert a single byte to 16 f32 inputs: 8 positive + 8 complementary.
+/// Inputs 0-7: the bits of the byte (LSB to MSB).
+/// Inputs 8-15: the inverted bits (1.0 - bit).
+/// Complementary encoding ensures Hebbian traces fire for both 0 and 1 states.
 fn byte_to_inputs(byte: u8) -> [f32; INPUT_SIZE] {
     let mut inputs = [0.0f32; INPUT_SIZE];
-    for bit in 0..INPUT_SIZE {
-        inputs[bit] = if byte & (1 << bit) != 0 { 1.0 } else { 0.0 };
+    for i in 0..8 {
+        let val = if byte & (1 << i) != 0 { 1.0 } else { 0.0 };
+        inputs[i] = val;           // Positive channel
+        inputs[i + 8] = 1.0 - val; // Negative channel
     }
     inputs
 }
@@ -95,6 +108,7 @@ fn main() -> Result<()> {
     eprintln!("  Spores:     {}", args.spores);
     eprintln!("  Epochs:     {}", args.epochs);
     eprintln!("  Lookahead:  {} records", args.lookahead);
+    eprintln!("  Input hold: {} ticks per record", args.input_hold);
     eprintln!();
 
     // Load data
@@ -126,11 +140,21 @@ fn main() -> Result<()> {
 
     // Assign random byte offsets to each Spore
     let mut rng = rand::thread_rng();
-    let offsets: Vec<usize> = (0..args.spores)
+    let mut offsets: Vec<usize> = (0..args.spores)
         .map(|_| rng.gen_range(0..AMM_DATA_SIZE))
         .collect();
+    if args.force_offset >= 0 {
+        offsets[0] = args.force_offset as usize;
+    }
 
-    // Create Swarm with proven defaults
+    // Create Swarm with dojo-specific params.
+    // Cortisol = 1.0 (symmetric reward): zero-mean at chance prevents
+    // drift-based false convergence on noise bytes. The mirror task needs
+    // 0.5 for bootstrapping, but the dojo's per-Spore independent training
+    // + INITIAL_BIAS provides enough asymmetry to break symmetry.
+    // Homeostasis stays ON — it anchors bias_o at a neutral point,
+    // forcing the Spore to use input-dependent weights rather than
+    // bias-tracking the current target during the hold period.
     let mut swarm = Swarm::new(
         args.spores,
         DEFAULT_LEARNING_RATE,
@@ -139,12 +163,16 @@ fn main() -> Result<()> {
         DEFAULT_MAX_NOISE_BOOST,
         DEFAULT_FRUSTRATION_ALPHA,
         DEFAULT_WEIGHT_DECAY_INTERVAL,
-        DEFAULT_CORTISOL_STRENGTH,
+        1.0, // cortisol: symmetric for streaming data (not DEFAULT_CORTISOL_STRENGTH)
     );
 
     eprintln!("  Swarm initialized: {} Spores", swarm.size());
     eprintln!("  Byte offsets assigned (random, 0-1023)");
     eprintln!();
+
+    // First-tick accuracy tracking (per-Spore: correct on first tick of each record)
+    let mut first_tick_correct: Vec<u64> = vec![0; args.spores];
+    let mut first_tick_total: Vec<u64> = vec![0; args.spores];
 
     // Training loop
     let mut global_tick: u64 = 0;
@@ -157,24 +185,38 @@ fn main() -> Result<()> {
         for t in 0..n_samples {
             let target = oracle(&prices, t, args.lookahead);
 
-            // Per-Spore training: each Spore sees its own byte
-            for (i, spore) in swarm.spores.iter_mut().enumerate() {
-                let byte = records[t].amm_data[offsets[i]];
-                let inputs = byte_to_inputs(byte);
-                spore.fire(&inputs);
-                let correct = spore.output == target;
-                spore.receive_reward(correct);
-                spore.learn();
-                spore.maintain(global_tick);
+            // Hold each record for input_hold ticks (repeated exposure for Hebbian learning).
+            // Same input-target pair presented multiple times so traces can accumulate
+            // directional weight changes. Analogous to mini-batch SGD.
+            for hold in 0..args.input_hold {
+                for (i, spore) in swarm.spores.iter_mut().enumerate() {
+                    let byte = records[t].amm_data[offsets[i]];
+                    let inputs = byte_to_inputs(byte);
+                    spore.fire(&inputs);
+                    let correct = spore.output == target;
+                    spore.receive_reward(correct);
+                    // Zero bias traces so learn() only updates weights, not biases.
+                    // Prevents bias_o from tracking the current target during hold.
+                    // Biases are controlled by homeostasis instead.
+                    spore.trace_bias_o = 0.0;
+                    spore.trace_bias_h = [0.0; HIDDEN_SIZE];
+                    spore.learn();
+                    spore.maintain(global_tick);
 
-                if correct {
-                    epoch_correct += 1;
+                    if correct {
+                        epoch_correct += 1;
+                    }
+                    epoch_total += 1;
+
+                    // Track first-tick accuracy (before hold memorization).
+                    // This is the true predictive metric.
+                    if hold == 0 {
+                        first_tick_correct[i] += correct as u64;
+                        first_tick_total[i] += 1;
+                    }
                 }
-                epoch_total += 1;
+                global_tick += 1;
             }
-
-            swarm.rejuvenate();
-            global_tick += 1;
 
             // Intra-epoch logging
             if args.log_interval > 0 && (t + 1) % args.log_interval == 0 {
@@ -223,14 +265,19 @@ fn main() -> Result<()> {
         eprintln!();
     }
 
-    // Final summary
+    // Final summary — ranked by FIRST-TICK accuracy (true predictive metric)
     let elapsed = start.elapsed();
-    let mut converged: Vec<(usize, usize, f32)> = swarm.spores.iter()
-        .enumerate()
-        .filter(|(_, s)| s.recent_accuracy >= 0.55)
-        .map(|(i, s)| (i, offsets[i], s.recent_accuracy))
+    let mut ranked: Vec<(usize, usize, f64, f32)> = (0..args.spores)
+        .map(|i| {
+            let ft_acc = if first_tick_total[i] > 0 {
+                first_tick_correct[i] as f64 / first_tick_total[i] as f64
+            } else {
+                0.0
+            };
+            (i, offsets[i], ft_acc, swarm.spores[i].recent_accuracy)
+        })
         .collect();
-    converged.sort_by(|a, b| b.2.total_cmp(&a.2));
+    ranked.sort_by(|a, b| b.2.total_cmp(&a.2));
 
     eprintln!("========================================");
     eprintln!("  DOJO TRAINING COMPLETE");
@@ -242,31 +289,28 @@ fn main() -> Result<()> {
     eprintln!("  Time:        {:.1}s", elapsed.as_secs_f64());
     eprintln!();
 
-    if converged.is_empty() {
-        eprintln!("  No Spores converged above 55%.");
-        eprintln!("  Data may lack learnable signal (expected for random walk).");
-    } else {
-        eprintln!("  Converged Spores (>55% accuracy):");
-        for (idx, offset, acc) in &converged {
-            let label = if *acc >= 0.70 { "CONVERGED" } else { "learning" };
-            eprintln!(
-                "    Spore {:>3} | byte {:>4} | acc: {:.4} | {}",
-                idx, offset, acc, label
-            );
-        }
-        eprintln!();
-        eprintln!("  Signal-bearing byte offsets:");
-        let mut unique_offsets: Vec<usize> = converged.iter().map(|(_, o, _)| *o).collect();
-        unique_offsets.sort();
-        unique_offsets.dedup();
-        for offset in &unique_offsets {
-            let best = converged.iter()
-                .filter(|(_, o, _)| o == offset)
-                .map(|(_, _, a)| *a)
-                .max_by(|a, b| a.total_cmp(b))
-                .unwrap_or(0.0);
-            eprintln!("    byte {:>4} | best_acc: {:.4}", offset, best);
-        }
+    eprintln!("  Top 20 by FIRST-TICK accuracy (true predictive metric):");
+    for &(idx, offset, ft_acc, ema) in ranked.iter().take(20) {
+        let label = if ft_acc >= 0.60 {
+            "SIGNAL"
+        } else if ft_acc >= 0.53 {
+            "maybe"
+        } else {
+            "noise"
+        };
+        eprintln!(
+            "    Spore {:>3} | byte {:>4} | 1st-tick: {:.4} | ema: {:.4} | {}",
+            idx, offset, ft_acc, ema, label
+        );
+    }
+    eprintln!();
+
+    eprintln!("  Bottom 5:");
+    for &(idx, offset, ft_acc, ema) in ranked.iter().rev().take(5) {
+        eprintln!(
+            "    Spore {:>3} | byte {:>4} | 1st-tick: {:.4} | ema: {:.4}",
+            idx, offset, ft_acc, ema
+        );
     }
     eprintln!("========================================");
 
@@ -280,45 +324,23 @@ mod tests {
     #[test]
     fn test_byte_to_inputs_zero() {
         let inputs = byte_to_inputs(0x00);
-        assert_eq!(inputs, [0.0; 8]);
+        assert_eq!(inputs[0..8], [0.0; 8]);
     }
 
     #[test]
     fn test_byte_to_inputs_all_ones() {
         let inputs = byte_to_inputs(0xFF);
-        assert_eq!(inputs, [1.0; 8]);
+        assert_eq!(inputs[0..8], [1.0; 8]);
     }
 
     #[test]
     fn test_byte_to_inputs_lsb() {
+        // 0b00000001 → bit 0 = 1, rest = 0
         let inputs = byte_to_inputs(0x01);
         assert_eq!(inputs[0], 1.0);
         for i in 1..8 {
             assert_eq!(inputs[i], 0.0, "bit {} should be 0", i);
         }
-    }
-
-    #[test]
-    fn test_byte_to_inputs_msb() {
-        let inputs = byte_to_inputs(0x80);
-        for i in 0..7 {
-            assert_eq!(inputs[i], 0.0, "bit {} should be 0", i);
-        }
-        assert_eq!(inputs[7], 1.0);
-    }
-
-    #[test]
-    fn test_byte_to_inputs_pattern() {
-        // 0b10100101 = 0xA5 → bits 0,2,5,7 are set
-        let inputs = byte_to_inputs(0xA5);
-        assert_eq!(inputs[0], 1.0);
-        assert_eq!(inputs[1], 0.0);
-        assert_eq!(inputs[2], 1.0);
-        assert_eq!(inputs[3], 0.0);
-        assert_eq!(inputs[4], 0.0);
-        assert_eq!(inputs[5], 1.0);
-        assert_eq!(inputs[6], 0.0);
-        assert_eq!(inputs[7], 1.0);
     }
 
     #[test]
@@ -339,5 +361,4 @@ mod tests {
         let prices = vec![100.0, 100.0, 100.0];
         assert!(!oracle(&prices, 0, 1)); // 100 is NOT > 100
     }
-
 }

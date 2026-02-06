@@ -8,8 +8,11 @@
 // Network Topology (per Spore)
 // =============================================================================
 
-/// Number of input neurons per Spore (all Spores see the full input).
-pub const INPUT_SIZE: usize = 8;
+/// Number of input neurons per Spore.
+/// 16 = 8 positive bits + 8 complementary (inverted) bits.
+/// Complementary encoding ensures active traces for both 0 and 1 states,
+/// allowing Hebbian learning from absence (not just presence).
+pub const INPUT_SIZE: usize = 16;
 
 /// Number of hidden neurons per Spore.
 /// Fixed at 4 for the "hydrogen atom" topology. Phase 3 may make configurable.
@@ -52,9 +55,9 @@ pub const DEFAULT_BASE_NOISE: f32 = 0.001;
 pub const DEFAULT_MAX_NOISE_BOOST: f32 = 0.05;
 
 /// Default cortisol strength (moderate asymmetric punishment).
-/// Dopamine is always +1.0; cortisol = 0.5 provides moderate positive
-/// drift at chance (E[d]=0.25) which bootstraps learning, while hidden
-/// bias decay prevents the drift from causing runaway.
+/// 0.5 provides positive drift at chance (E[d]=+0.25) which bootstraps
+/// learning. Cortisol=1.0 gives zero-mean at chance, which is correct for
+/// streaming/dojo use but kills bootstrapping in the mirror task.
 pub const DEFAULT_CORTISOL_STRENGTH: f32 = 0.5;
 
 // =============================================================================

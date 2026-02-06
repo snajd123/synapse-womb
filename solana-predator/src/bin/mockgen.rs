@@ -65,14 +65,9 @@ fn main() -> Result<()> {
         let mut amm_data = [0u8; AMM_DATA_SIZE];
         rng.fill(&mut amm_data[..]);
 
-        // Decide the NEXT record's direction and embed it in the MSB of the signal byte.
-        // Other bits stay random, giving the Spore varied inputs with one learnable bit.
+        // Decide the NEXT record's direction and embed it in the signal byte.
         next_direction = rng.gen();
-        if next_direction {
-            amm_data[args.signal_offset] |= 0x80; // Set bit 7
-        } else {
-            amm_data[args.signal_offset] &= 0x7F; // Clear bit 7
-        }
+        amm_data[args.signal_offset] = if next_direction { 0xFF } else { 0x00 };
 
         let record = Record {
             slot,

@@ -2,7 +2,7 @@ use spore_sim::constants::*;
 
 #[test]
 fn test_topology_constants() {
-    assert_eq!(INPUT_SIZE, 8);
+    assert_eq!(INPUT_SIZE, 16);
     assert_eq!(HIDDEN_SIZE, 4);
 }
 
