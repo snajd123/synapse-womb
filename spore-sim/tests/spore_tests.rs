@@ -106,8 +106,10 @@ fn test_fire_sets_traces_on_active_synapses() {
     s.base_noise = 0.0;
     s.frustration = 0.0;
 
-    for j in 0..HIDDEN_SIZE {
-        s.bias_h[j] = 100.0;
+    // Give hidden neuron 0 the highest sum so it wins WTA
+    s.bias_h[0] = 100.0;
+    for j in 1..HIDDEN_SIZE {
+        s.bias_h[j] = -100.0; // suppress others
     }
     s.bias_o = 100.0;
 
@@ -116,10 +118,19 @@ fn test_fire_sets_traces_on_active_synapses() {
 
     s.fire(&inputs);
 
-    for j in 0..HIDDEN_SIZE {
-        assert_eq!(s.traces_ih[j][0], 1.0, "Active input should have trace 1.0");
-        assert_eq!(s.traces_ih[j][1], 0.0, "Inactive input should have trace 0.0");
-        assert_eq!(s.trace_bias_h[j], 1.0, "Fired hidden should have bias trace 1.0");
+    // Only the winner (H0) should have traces
+    assert_eq!(s.traces_ih[0][0], 1.0, "Winner's active input should have trace 1.0");
+    assert_eq!(s.traces_ih[0][1], 0.0, "Winner's inactive input should have trace 0.0");
+    assert_eq!(s.trace_bias_h[0], 1.0, "Winner should have bias trace 1.0");
+
+    // Suppressed neurons should NOT have traces (no noise)
+    for j in 1..HIDDEN_SIZE {
+        for i in 0..INPUT_SIZE {
+            assert_eq!(s.traces_ih[j][i], 0.0,
+                "Suppressed H{} should have no traces", j);
+        }
+        assert_eq!(s.trace_bias_h[j], 0.0,
+            "Suppressed H{} should have no bias trace", j);
     }
     assert_eq!(s.trace_bias_o, 1.0, "Fired output should have bias trace 1.0");
 }
