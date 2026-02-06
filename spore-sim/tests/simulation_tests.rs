@@ -5,6 +5,7 @@ fn test_simulation_new() {
     let sim = Simulation::new();
     assert_eq!(sim.tick, 0);
     assert_eq!(sim.recent_accuracy, 0.0);
+    assert_eq!(sim.swarm().size(), 32);
 }
 
 #[test]
@@ -44,6 +45,6 @@ fn test_simulation_step_updates_ema() {
 
 #[test]
 fn test_simulation_custom_swarm_size() {
-    let sim = Simulation::with_full_params(32, 50, 0.1, 0.9, 0.05, 100, 0.2, 0.3);
-    assert_eq!(sim.swarm().size(), 32);
+    let sim = Simulation::with_full_params(16, 50, 0.1, 0.9, 0.05, 100, 0.2, 0.3);
+    assert_eq!(sim.swarm().size(), 16);
 }

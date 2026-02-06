@@ -80,7 +80,7 @@ pub const DEFAULT_HOMEOSTASIS_RATE: f32 = 0.01;
 pub const DEFAULT_INPUT_HOLD_TICKS: u64 = 50;
 
 /// Default number of output bits (Spores) for the mirror task.
-pub const DEFAULT_SWARM_SIZE: usize = 8;
+pub const DEFAULT_SWARM_SIZE: usize = 32;
 
 // =============================================================================
 // Frustration

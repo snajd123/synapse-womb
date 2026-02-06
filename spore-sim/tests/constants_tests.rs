@@ -18,7 +18,7 @@ fn test_learning_defaults() {
 #[test]
 fn test_environment_defaults() {
     assert_eq!(DEFAULT_INPUT_HOLD_TICKS, 50);
-    assert_eq!(DEFAULT_SWARM_SIZE, 8);
+    assert_eq!(DEFAULT_SWARM_SIZE, 32);
 }
 
 #[test]
