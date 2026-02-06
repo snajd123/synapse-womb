@@ -5,13 +5,15 @@ edition = "2021"
 
 [dependencies]
 spore-sim = { path = "../spore-sim" }
-tonic = "0.12"
+tonic = "0.14"
 tokio = { version = "1", features = ["full"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 bs58 = "0.5"
 anyhow = "1"
 futures = "0.3"
 rand = "0.8"
+yellowstone-grpc-client = "11"
+yellowstone-grpc-proto = "11"
 
 [[bin]]
 name = "sniffer"
