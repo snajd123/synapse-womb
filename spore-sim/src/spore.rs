@@ -161,23 +161,45 @@ impl Spore {
 
     /// Forward pass: compute hidden layer and output bit.
     ///
-    /// Hard threshold everywhere: `sum + bias > 0.0` → fires.
-    /// Noise injection based on frustration level.
+    /// Hidden layer uses Winner-Take-All (lateral inhibition):
+    /// only the neuron with the highest sum fires via threshold.
+    /// Suppressed neurons can still fire via noise (exploration).
+    /// This forces hidden neurons to specialize on different features.
+    ///
+    /// Output uses hard threshold: `sum + bias > 0.0` → fires.
     /// Sets eligibility traces for active synapses.
     pub fn fire(&mut self, inputs: &[f32; INPUT_SIZE]) -> bool {
         let mut rng = rand::thread_rng();
         let noise_rate = self.base_noise + (self.frustration * self.max_noise_boost);
 
         // ====================================================================
-        // HIDDEN LAYER (hard threshold)
+        // HIDDEN LAYER — Winner-Take-All (Lateral Inhibition)
         // ====================================================================
-        for j in 0..HIDDEN_SIZE {
-            let mut sum = self.bias_h[j];
-            for i in 0..INPUT_SIZE {
-                sum += inputs[i] * self.weights_ih[j][i];
-            }
 
-            self.hidden[j] = sum > 0.0 || rng.gen::<f32>() < noise_rate;
+        // Step 1: Compute all hidden sums
+        let mut sums = [0.0_f32; HIDDEN_SIZE];
+        for j in 0..HIDDEN_SIZE {
+            sums[j] = self.bias_h[j];
+            for i in 0..INPUT_SIZE {
+                sums[j] += inputs[i] * self.weights_ih[j][i];
+            }
+        }
+
+        // Step 2: Find the winner (highest sum)
+        let mut winner = 0;
+        for j in 1..HIDDEN_SIZE {
+            if sums[j] > sums[winner] {
+                winner = j;
+            }
+        }
+
+        // Step 3: Winner fires via threshold; suppressed fire only via noise
+        for j in 0..HIDDEN_SIZE {
+            if j == winner {
+                self.hidden[j] = sums[j] > 0.0 || rng.gen::<f32>() < noise_rate;
+            } else {
+                self.hidden[j] = rng.gen::<f32>() < noise_rate;
+            }
 
             // Set traces for active synapses
             if self.hidden[j] {
