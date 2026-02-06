@@ -310,13 +310,14 @@ pub fn evaluate_full(genome: &Genome, ticks: u64) -> EvalResult {
 /// - Unstable: recent_accuracy * 500
 fn evaluate_single(genome: &Genome, ticks: u64, allow_early_exit: bool) -> EvalResult {
     let mut sim = Simulation::with_full_params(
-        0,  // reward_latency (fixed for tuner)
-        genome.trace_decay,
+        8,  // n_outputs (fixed for tuner)
         genome.input_hold_ticks,
         genome.learning_rate,
+        genome.trace_decay,
         genome.max_noise_boost,
         genome.weight_decay_interval,
         genome.frustration_alpha,
+        0.3,  // cortisol_strength (fixed for tuner)
     );
 
     let mut stability_window_start: Option<u64> = None;
