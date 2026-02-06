@@ -10,6 +10,8 @@
 use rand::Rng;
 use serde::{Serialize, Deserialize};
 
+use crate::simulation::Simulation;
+
 /// A genome encoding 6 tunable hyperparameters for the Spore network.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Genome {
@@ -98,5 +100,149 @@ impl Genome {
             frustration_alpha: if rng.gen() { parent_a.frustration_alpha } else { parent_b.frustration_alpha },
             input_hold_ticks: if rng.gen() { parent_a.input_hold_ticks } else { parent_b.input_hold_ticks },
         }
+    }
+}
+
+/// Result of evaluating a single Genome.
+#[derive(Clone, Debug)]
+pub struct EvalResult {
+    /// Fitness score (higher = better)
+    pub score: f32,
+
+    /// Mean accuracy since convergence (or final accuracy if never converged)
+    pub final_accuracy: f32,
+
+    /// Tick at which stable convergence was achieved (None = never)
+    pub convergence_tick: Option<u64>,
+
+    /// Whether the genome achieved stable convergence
+    pub stable: bool,
+}
+
+/// Fast evaluation for use during evolution loop.
+///
+/// Runs the genome 3 times (different random sequences) and returns the WORST result.
+/// Includes early exit: if stable for 2000+ ticks at 98%+, stop.
+pub fn evaluate_fast(genome: &Genome, ticks: u64) -> EvalResult {
+    let results: Vec<EvalResult> = (0..3)
+        .map(|_| evaluate_single(genome, ticks, true))
+        .collect();
+
+    results.into_iter()
+        .min_by(|a, b| a.score.total_cmp(&b.score))
+        .unwrap()
+}
+
+/// Full marathon evaluation for Final Exam.
+///
+/// Runs the genome 3 times with NO early exit. Must survive all ticks.
+/// Returns the WORST result (robustness check).
+pub fn evaluate_full(genome: &Genome, ticks: u64) -> EvalResult {
+    let results: Vec<EvalResult> = (0..3)
+        .map(|_| evaluate_single(genome, ticks, false))
+        .collect();
+
+    results.into_iter()
+        .min_by(|a, b| a.score.total_cmp(&b.score))
+        .unwrap()
+}
+
+/// Evaluate a single genome for a given number of ticks.
+///
+/// IMPORTANT: Uses INSTANTANEOUS per-tick accuracy from sim.step() return value,
+/// NOT the EMA (sim.recent_accuracy). The EMA lags by ~30-45 ticks and would make
+/// convergence revocation sluggish. Per-tick accuracy gives honest, real-time signal.
+///
+/// Stability detection (Option B):
+/// - Track when accuracy first crosses 90%
+/// - If accuracy stays >= 85% for 1000 consecutive ticks -> stable convergence
+/// - Dip below 85% -> reset timer AND revoke convergence
+///
+/// Score:
+/// - Stable: mean_accuracy_since_converge * 2000 - (convergence_tick / 100)
+/// - Unstable: recent_accuracy * 500
+fn evaluate_single(genome: &Genome, ticks: u64, allow_early_exit: bool) -> EvalResult {
+    let mut sim = Simulation::with_full_params(
+        0,  // reward_latency (fixed for tuner)
+        genome.trace_decay,
+        genome.input_hold_ticks,
+        genome.learning_rate,
+        genome.max_noise_boost,
+        genome.weight_decay_interval,
+        genome.frustration_alpha,
+    );
+
+    let mut stability_window_start: Option<u64> = None;
+    let mut convergence_tick: Option<u64> = None;
+    let mut accuracy_sum_since_converge: f32 = 0.0;
+    let mut ticks_since_converge: u64 = 0;
+    let mut last_accuracy: f32 = 0.0;
+
+    for tick in 0..ticks {
+        // step() returns Some(accuracy) when reward delivered, None otherwise
+        // With reward_latency=0, this is always Some
+        let tick_accuracy = sim.step();
+
+        // Use per-tick accuracy for stability detection (NOT the EMA)
+        let acc = match tick_accuracy {
+            Some(a) => { last_accuracy = a; a }
+            None => last_accuracy,  // Hold last known accuracy between rewards
+        };
+
+        // Stability detection
+        if acc >= 0.90 {
+            if stability_window_start.is_none() {
+                stability_window_start = Some(tick);
+            }
+            if tick - stability_window_start.unwrap() >= 1000 && convergence_tick.is_none() {
+                convergence_tick = Some(stability_window_start.unwrap());
+            }
+        } else if acc < 0.85 {
+            stability_window_start = None;
+            convergence_tick = None;  // REVOKE on crash
+            accuracy_sum_since_converge = 0.0;
+            ticks_since_converge = 0;
+        }
+        // 0.85 <= acc < 0.90: timer continues, no action
+
+        // Track integral accuracy after convergence
+        if convergence_tick.is_some() {
+            accuracy_sum_since_converge += acc;
+            ticks_since_converge += 1;
+
+            // Early exit (fast eval only): stable for 2000+ ticks at 98%+
+            if allow_early_exit && ticks_since_converge >= 2000 {
+                let mean_acc = accuracy_sum_since_converge / ticks_since_converge as f32;
+                if mean_acc >= 0.98 {
+                    return EvalResult {
+                        score: mean_acc * 2000.0 - (convergence_tick.unwrap() as f32 / 100.0),
+                        final_accuracy: mean_acc,
+                        convergence_tick,
+                        stable: true,
+                    };
+                }
+            }
+        }
+    }
+
+    // End of run scoring
+    let stable = convergence_tick.is_some() && ticks_since_converge > 0;
+    let mean_acc = if ticks_since_converge > 0 {
+        accuracy_sum_since_converge / ticks_since_converge as f32
+    } else {
+        sim.recent_accuracy  // Fall back to EMA only for unstable genomes
+    };
+
+    let score = if stable {
+        mean_acc * 2000.0 - (convergence_tick.unwrap() as f32 / 100.0)
+    } else {
+        sim.recent_accuracy * 500.0
+    };
+
+    EvalResult {
+        score,
+        final_accuracy: mean_acc,
+        convergence_tick,
+        stable,
     }
 }

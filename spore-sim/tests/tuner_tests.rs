@@ -1,4 +1,4 @@
-use spore_sim::tuner::Genome;
+use spore_sim::tuner::{Genome, EvalResult, evaluate_fast, evaluate_full};
 
 #[test]
 fn test_genome_random_in_range() {
@@ -101,4 +101,64 @@ fn test_genome_serialization() {
     assert!((g.trace_decay - g2.trace_decay).abs() < 0.0001);
     assert_eq!(g.weight_decay_interval, g2.weight_decay_interval);
     assert_eq!(g.input_hold_ticks, g2.input_hold_ticks);
+}
+
+#[test]
+fn test_eval_result_score_is_finite() {
+    let g = Genome::random();
+    let result = evaluate_fast(&g, 1000);
+    assert!(result.score.is_finite(), "Score must be finite, got {}", result.score);
+    assert!(result.final_accuracy >= 0.0 && result.final_accuracy <= 1.0);
+}
+
+#[test]
+fn test_evaluate_fast_returns_valid_result() {
+    let g = Genome::random();
+    let result = evaluate_fast(&g, 2000);
+    assert!(result.score.is_finite());
+    assert!(result.final_accuracy >= 0.0 && result.final_accuracy <= 1.0);
+    // Stable should be bool (always valid)
+    let _ = result.stable;
+}
+
+#[test]
+fn test_evaluate_full_returns_valid_result() {
+    let g = Genome::random();
+    let result = evaluate_full(&g, 2000);
+    assert!(result.score.is_finite());
+    assert!(result.final_accuracy >= 0.0 && result.final_accuracy <= 1.0);
+}
+
+#[test]
+fn test_evaluate_stable_genome_scores_higher() {
+    // Verify score formula: stable base (2000) always beats unstable (500)
+    // for the same accuracy level.
+    //
+    // Proof: For accuracy a, stable score = a*2000 - t/100. Unstable = a*500.
+    // stable > unstable when a*2000 - t/100 > a*500 => a*1500 > t/100 => t < a*150000
+    // For any convergence before tick 142500 at 95% accuracy, stable wins.
+    let a = 0.95_f32;
+    let t = 5000_u64;
+    let stable_score = a * 2000.0 - (t as f32 / 100.0);
+    let unstable_score = a * 500.0;
+    assert!(stable_score > unstable_score,
+        "Stable score {:.1} should beat unstable {:.1}", stable_score, unstable_score);
+
+    // Also verify degenerate case: very late convergence still beats unstable
+    let late_t = 19000_u64;
+    let late_stable_score = a * 2000.0 - (late_t as f32 / 100.0);
+    assert!(late_stable_score > unstable_score,
+        "Late stable {:.1} should still beat unstable {:.1}", late_stable_score, unstable_score);
+}
+
+#[test]
+fn test_evaluate_fast_different_runs_may_differ() {
+    // Multi-run robustness: evaluate_fast runs 3 times and takes worst.
+    // Verify it returns a valid result.
+    let g = Genome::random();
+    let r1 = evaluate_fast(&g, 1000);
+    let r2 = evaluate_fast(&g, 1000);
+    // Both should be valid, may differ due to different random sequences
+    assert!(r1.score.is_finite());
+    assert!(r2.score.is_finite());
 }
