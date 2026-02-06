@@ -95,23 +95,47 @@ impl Swarm {
         }
     }
 
-    /// Mean accuracy across all Spores.
+    /// Consensus accuracy: mean of best `recent_accuracy` per bit.
+    ///
+    /// For each of the 8 output bits, find the Spore with the highest
+    /// `recent_accuracy` assigned to that bit. The system accuracy is the
+    /// mean of these 8 best values.
     pub fn accuracy(&self) -> f32 {
         if self.spores.is_empty() {
             return 0.0;
         }
-        let sum: f32 = self.spores.iter().map(|s| s.recent_accuracy).sum();
-        sum / self.spores.len() as f32
+        let n_bits = 8;
+        let mut sum = 0.0_f32;
+        for k in 0..n_bits {
+            let best = self.spores.iter()
+                .enumerate()
+                .filter(|(i, _)| i % n_bits == k)
+                .map(|(_, s)| s.recent_accuracy)
+                .max_by(|a, b| a.total_cmp(b))
+                .unwrap_or(0.0);
+            sum += best;
+        }
+        sum / n_bits as f32
     }
 
-    /// Get the assembled output as a byte (first 8 Spores).
+    /// Get the assembled output as a byte using consensus mapping.
     ///
-    /// Spore 0 = bit 0 (LSB), Spore 7 = bit 7 (MSB).
+    /// For each bit k (0..7), find the Spore assigned to k with the
+    /// highest `recent_accuracy` and use its output. This is
+    /// "best expert wins" — system output equals the best Spore per bit.
     pub fn output_byte(&self) -> u8 {
         let mut byte = 0u8;
-        for (i, spore) in self.spores.iter().enumerate().take(8) {
-            if spore.output {
-                byte |= 1 << i;
+        for k in 0..8 {
+            let best_spore = self.spores.iter()
+                .enumerate()
+                .filter(|(i, _)| i % 8 == k)
+                .max_by(|(i_a, a), (i_b, b)| a.recent_accuracy.total_cmp(&b.recent_accuracy).then(i_b.cmp(i_a)))
+                .map(|(_, s)| s);
+
+            if let Some(spore) = best_spore {
+                if spore.output {
+                    byte |= 1 << k;
+                }
             }
         }
         byte

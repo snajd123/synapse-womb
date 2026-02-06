@@ -95,13 +95,18 @@ fn test_swarm_rejuvenation_respects_grace_period() {
 
 #[test]
 fn test_swarm_accuracy() {
-    let mut swarm = Swarm::new(4, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
+    let mut swarm = Swarm::new(8, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
     swarm.spores[0].recent_accuracy = 1.0;
     swarm.spores[1].recent_accuracy = 0.5;
     swarm.spores[2].recent_accuracy = 0.75;
     swarm.spores[3].recent_accuracy = 0.25;
+    swarm.spores[4].recent_accuracy = 0.8;
+    swarm.spores[5].recent_accuracy = 0.6;
+    swarm.spores[6].recent_accuracy = 0.9;
+    swarm.spores[7].recent_accuracy = 0.7;
     let acc = swarm.accuracy();
-    assert!((acc - 0.625).abs() < 0.001, "Mean should be 0.625, got {}", acc);
+    let expected = (1.0 + 0.5 + 0.75 + 0.25 + 0.8 + 0.6 + 0.9 + 0.7) / 8.0;
+    assert!((acc - expected).abs() < 0.001, "Expected {}, got {}", expected, acc);
 }
 
 #[test]
@@ -152,4 +157,62 @@ fn test_swarm_tick_target_mapping_modulo() {
     let accuracy = swarm.tick(&inputs, &targets, 0);
 
     assert_eq!(accuracy, 1.0, "All Spores should match targets[i % 8]");
+}
+
+#[test]
+fn test_swarm_output_byte_consensus_best_accuracy_wins() {
+    let mut swarm = Swarm::new(16, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
+
+    // For bit 0: Spores 0 and 8 compete
+    swarm.spores[0].output = false;
+    swarm.spores[0].recent_accuracy = 0.3;
+    swarm.spores[8].output = true;
+    swarm.spores[8].recent_accuracy = 0.9;
+
+    // For bits 1-7: set all Spores to output=false
+    for i in 1..16 {
+        if i != 8 {
+            swarm.spores[i].output = false;
+        }
+    }
+
+    let byte = swarm.output_byte();
+    assert_eq!(byte & 1, 1, "Bit 0 should be 1 (best-accuracy Spore 8 output)");
+}
+
+#[test]
+fn test_swarm_output_byte_consensus_tiebreak_uses_first() {
+    let mut swarm = Swarm::new(16, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
+
+    swarm.spores[0].output = true;
+    swarm.spores[0].recent_accuracy = 0.5;
+    swarm.spores[8].output = false;
+    swarm.spores[8].recent_accuracy = 0.5;
+
+    for i in 1..16 {
+        if i != 8 {
+            swarm.spores[i].output = false;
+        }
+    }
+
+    let byte = swarm.output_byte();
+    assert_eq!(byte & 1, 1, "Bit 0 should be 1 (tiebreak favors first Spore)");
+}
+
+#[test]
+fn test_swarm_accuracy_consensus_best_per_bit() {
+    let mut swarm = Swarm::new(16, 0.1, 0.9, 0.001, 0.05, 0.2, 100, 0.3);
+
+    swarm.spores[0].recent_accuracy = 0.3;
+    swarm.spores[8].recent_accuracy = 0.9;
+
+    for k in 1..8 {
+        swarm.spores[k].recent_accuracy = 0.8;
+        swarm.spores[k + 8].recent_accuracy = 0.2;
+    }
+
+    let acc = swarm.accuracy();
+    let expected = (0.9 + 7.0 * 0.8) / 8.0;
+    assert!((acc - expected).abs() < 0.001,
+        "Consensus accuracy should be {}, got {}", expected, acc);
 }
