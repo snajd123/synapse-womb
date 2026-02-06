@@ -41,11 +41,14 @@ fn main() -> Result<()> {
     let price_coin: u64 = 50_000_000_000_000; // ~50k SOL
     let mut price_pc: u64 = 7_500_000_000_000;    // ~7.5M USDC (SOL @ $150)
 
+    // Pre-decide the NEXT direction so record i's signal byte predicts record i+1's move
+    let mut next_direction: bool = rng.gen();
+
     for i in 0..args.records {
         let slot = 200_000_000 + i as u64;
 
-        // Random walk: price moves up or down
-        let direction: bool = rng.gen();
+        // This record's price move was decided in the PREVIOUS iteration's next_direction
+        let direction = next_direction;
         let magnitude: u64 = rng.gen_range(1_000_000..100_000_000); // Small moves
 
         if direction {
@@ -62,10 +65,14 @@ fn main() -> Result<()> {
         let mut amm_data = [0u8; AMM_DATA_SIZE];
         rng.fill(&mut amm_data[..]);
 
-        // Embed the signal: the byte at signal_offset encodes the NEXT direction
-        // This is what the Spore should learn to read
-        let next_direction: bool = rng.gen();
-        amm_data[args.signal_offset] = if next_direction { 0xFF } else { 0x00 };
+        // Decide the NEXT record's direction and embed it in the MSB of the signal byte.
+        // Other bits stay random, giving the Spore varied inputs with one learnable bit.
+        next_direction = rng.gen();
+        if next_direction {
+            amm_data[args.signal_offset] |= 0x80; // Set bit 7
+        } else {
+            amm_data[args.signal_offset] &= 0x7F; // Clear bit 7
+        }
 
         let record = Record {
             slot,

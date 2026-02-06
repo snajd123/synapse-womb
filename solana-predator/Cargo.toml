@@ -44,3 +44,7 @@ path = "src/bin/mockgen.rs"
 [[bin]]
 name = "fetch_history"
 path = "src/bin/fetch_history.rs"
+
+[[bin]]
+name = "dojo"
+path = "src/bin/dojo.rs"
